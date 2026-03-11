@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+*.egg-info/
+*.egg
+
+# Generated data
+dump_output/
+uploads/
+reports/*.json
+reports/*.md
+reports/*.html
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Version
+.python-version
+
+# Nested venvs
+medusa/venv/
+fridump/__pycache__/
+
+# APK files
+*.apk

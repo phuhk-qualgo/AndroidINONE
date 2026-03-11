@@ -5,6 +5,7 @@ import psutil
 import sys
 import shutil
 import re
+import glob
 import requests
 import tempfile
 import textwrap
@@ -14,16 +15,16 @@ from pathlib import Path
 from OpenSSL import crypto
 from requests.exceptions import ConnectionError
 
-# Đường dẫn ADB từ Android Studio
-ADB_PATH = "/Users/macbook/Library/Android/sdk/platform-tools/adb"
+ANDROID_SDK = os.path.expanduser("~/Library/Android/sdk")
+ADB_PATH = os.path.join(ANDROID_SDK, "platform-tools", "adb")
+EMULATOR_PATH = os.path.join(ANDROID_SDK, "emulator", "emulator")
+ROOTAVD_DIR = os.path.join(ANDROID_SDK, "rootAVD")
 
-# Kiểm tra ADB tồn tại
 if not os.path.exists(ADB_PATH):
     print(f"\033[91mADB không tìm thấy tại: {ADB_PATH}\033[0m")
     print("Vui lòng kiểm tra Android Studio đã cài đặt platform-tools chưa.")
     sys.exit(1)
-
-logo = """
+logo = r"""
 \033[0m\033[38;5;39m
     ╔══════════════════════════════════════════════════════╗
     ║  🛡️  ANDROID SECURITY AUTOMATION TOOLKIT  🛡️         ║
@@ -56,8 +57,16 @@ def is_device_connected():
     return output == 'device'
 
 def get_device_arch():
-    arch = run_adb(['shell', 'getprop', 'ro.product.cpu.abi'], capture=True)
-    return arch or "arm64-v8a"
+    abi = run_adb(['shell', 'getprop', 'ro.product.cpu.abi'], capture=True).strip()
+
+    mapping = {
+        "arm64-v8a": "arm64",
+        "armeabi-v7a": "arm",
+        "x86": "x86",
+        "x86_64": "x86_64"
+    }
+
+    return mapping.get(abi, "arm64")
 
 def is_tool_installed(tool):
     return shutil.which(tool) is not None
@@ -67,29 +76,28 @@ def install_tool_pip(tool):
 
 def check_root_status():
     """Kiểm tra thiết bị đã root chưa"""
-    # Thử nhiều path cho su
-    su_paths = [
-        '/data/local/tmp/su',
-        '/data/adb/magisk/su', 
-        '/sbin/su',
-        '/system/xbin/su',
-        '/system/bin/su'
-    ]
-    
-    for su_path in su_paths:
-        result = run_adb(['shell', su_path, '0', 'id'], capture=True)
-        if result and 'uid=0' in result:
-            print(f"\033[1;32m✓ Thiết bị đã có quyền ROOT (su: {su_path})\033[0m")
-            print(f"  {result}")
-            return True
-    
-    # Thử adb root
+    # Check if adb shell already runs as root
     result = run_adb(['shell', 'id'], capture=True)
     if result and 'uid=0' in result:
         print("\033[1;32m✓ ADB đang chạy ở chế độ root\033[0m")
         print(f"  {result}")
         return True
-    
+
+    su_paths = [
+        '/sbin/su',
+        '/system/xbin/su',
+        '/system/bin/su',
+        '/data/adb/magisk/su',
+        '/data/local/tmp/su',
+    ]
+
+    for su_path in su_paths:
+        result = run_adb(['shell', su_path, '-c', 'id'], capture=True)
+        if result and 'uid=0' in result:
+            print(f"\033[1;32m✓ Thiết bị đã có quyền ROOT (su: {su_path})\033[0m")
+            print(f"  {result}")
+            return True
+
     print("\033[93m✗ Thiết bị chưa ROOT\033[0m")
     return False
 
@@ -148,335 +156,281 @@ def download_magisk(version="27.0"):
         print(f"\n\033[91m✗ Lỗi tải Magisk: {e}\033[0m")
         return None
 
-def patch_ramdisk_with_magisk(magisk_apk):
-    """Patch ramdisk.img với Magisk"""
-    print("\n[+] Đang patch ramdisk với Magisk...")
-    
+def find_ramdisk_img(api_level, arch):
+    """Find ramdisk.img for the current AVD in SDK system-images"""
+    search_patterns = [
+        os.path.join(ANDROID_SDK, "system-images", f"android-{api_level}", "*", arch, "ramdisk.img"),
+        os.path.join(ANDROID_SDK, "system-images", f"android-{api_level}", "*", "*", "ramdisk.img"),
+    ]
+    for pattern in search_patterns:
+        matches = glob.glob(pattern)
+        if matches:
+            return matches[0]
+    return None
+
+
+def setup_rootavd():
+    """Download rootAVD tool from GitLab if not present"""
+    rootavd_sh = os.path.join(ROOTAVD_DIR, "rootAVD.sh")
+    if os.path.isdir(ROOTAVD_DIR) and os.path.isfile(rootavd_sh):
+        print("    ✓ rootAVD đã có sẵn")
+        return True
+
+    print("    → Đang tải rootAVD từ GitLab...")
     try:
-        # Push Magisk APK lên thiết bị
-        print("    → Push Magisk lên thiết bị...")
-        run_adb(['push', magisk_apk, '/data/local/tmp/magisk.apk'])
-        
-        # Cài đặt Magisk APK
-        print("    → Cài đặt Magisk...")
+        result = subprocess.run(
+            ['git', 'clone', 'https://gitlab.com/newbit/rootAVD.git', ROOTAVD_DIR],
+            capture_output=True, text=True, timeout=120
+        )
+        if result.returncode == 0:
+            os.chmod(rootavd_sh, 0o755)
+            print("    ✓ Tải rootAVD thành công!")
+            return True
+        print(f"    ✗ Lỗi clone: {result.stderr.strip()}")
+        return False
+    except subprocess.TimeoutExpired:
+        print("    ✗ Timeout khi tải rootAVD (>2 phút)")
+        return False
+    except Exception as e:
+        print(f"    ✗ Lỗi: {e}")
+        return False
+
+
+def create_su_binary():
+    """Create a working su wrapper in /data/local/tmp for tool compatibility"""
+    su_script = textwrap.dedent('''\
+        #!/system/bin/sh
+        uid=""
+        cmd=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -c) shift; cmd="$*"; break ;;
+                --) shift; break ;;
+                [0-9]*) uid="$1"; shift ;;
+                *) break ;;
+            esac
+        done
+        if [ -n "$cmd" ]; then
+            exec /system/bin/sh -c "$cmd"
+        elif [ $# -gt 0 ]; then
+            exec /system/bin/sh -c "$*"
+        else
+            exec /system/bin/sh
+        fi
+    ''')
+
+    with tempfile.NamedTemporaryFile('w', delete=False, suffix='.sh') as f:
+        f.write(su_script)
+        tmp = f.name
+
+    try:
+        run_adb(['push', tmp, '/data/local/tmp/su'])
+        run_adb(['shell', 'chmod', '755', '/data/local/tmp/su'])
+        for dest in ['/data/adb/magisk', '/system/xbin']:
+            run_adb(['shell', 'mkdir', '-p', dest], capture=True)
+            run_adb(['shell', 'cp', '/data/local/tmp/su', f'{dest}/su'], capture=True)
+            run_adb(['shell', 'chmod', '755', f'{dest}/su'], capture=True)
+    finally:
+        os.unlink(tmp)
+
+
+def root_via_adb_root(avd_info):
+    """Root AVD via adb root — works on userdebug/eng builds (Google APIs images)"""
+    print("[1/3] Restart ADB với quyền root...")
+
+    result = run_adb(['root'], capture=True)
+    if result and 'cannot run as root' in result:
+        print(f"    ✗ {result}")
+        print("    → Fallback sang rootAVD method...\n")
+        return root_via_rootavd(avd_info)
+
+    time.sleep(3)
+    run_adb(['wait-for-device'], capture=True)
+
+    test = run_adb(['shell', 'id'], capture=True)
+    if not test or 'uid=0' not in test:
+        print("    ✗ adb root không thành công")
+        print("    → Fallback sang rootAVD method...\n")
+        return root_via_rootavd(avd_info)
+
+    print("    ✓ ADB đang chạy với quyền root!")
+
+    print("\n[2/3] Tạo su binary cho tool compatibility...")
+    create_su_binary()
+    print("    ✓ su binary đã tạo!")
+
+    print("\n[3/3] Cài đặt Magisk APK...")
+    magisk_apk = download_magisk("27.0")
+    if magisk_apk:
         run_adb(['install', '-r', magisk_apk])
-        
-        # Extract ramdisk
-        print("    → Extract ramdisk...")
-        run_adb(['shell', 'mkdir', '-p', '/data/local/tmp/ramdisk'])
-        
-        # Tạo script patch tự động
-        patch_script = '''#!/system/bin/sh
-cd /data/local/tmp
-mkdir -p ramdisk
-cd ramdisk
+        print("    ✓ Magisk APK đã cài!")
 
-# Extract Magisk
-unzip -o ../magisk.apk -d magisk_extract >/dev/null 2>&1
+    print_root_success("adb root")
+    return True
 
-# Copy Magisk binaries
-if [ -f "magisk_extract/lib/arm64-v8a/libmagisk64.so" ]; then
-    cp magisk_extract/lib/arm64-v8a/libmagisk64.so ./magisk64
-elif [ -f "magisk_extract/lib/armeabi-v7a/libmagisk32.so" ]; then
-    cp magisk_extract/lib/armeabi-v7a/libmagisk32.so ./magisk32
-fi
 
-chmod 755 magisk* 2>/dev/null
-
-echo "Magisk extracted successfully"
-'''
-        
-        # Tạo file script tạm
-        with tempfile.NamedTemporaryFile('w', delete=False, suffix='.sh') as f:
-            f.write(patch_script)
-            script_path = f.name
-        
-        # Push và chạy script
-        run_adb(['push', script_path, '/data/local/tmp/patch.sh'])
-        run_adb(['shell', 'chmod', '755', '/data/local/tmp/patch.sh'])
-        run_adb(['shell', 'sh', '/data/local/tmp/patch.sh'])
-        
-        os.unlink(script_path)
-        
-        print("    ✓ Patch hoàn tất!")
-        return True
-        
-    except Exception as e:
-        print(f"\033[91m✗ Lỗi patch: {e}\033[0m")
+def root_via_rootavd(avd_info):
+    """Root AVD via rootAVD — patches ramdisk.img with Magisk (works on production builds)"""
+    if not avd_info:
+        print("\033[91m✗ Không có thông tin AVD!\033[0m")
         return False
 
-def install_magisk_root():
-    """Cài đặt Magisk root hoàn chỉnh"""
-    print("\n[+] Đang cài đặt Magisk root...")
-    
+    print("[1/3] Chuẩn bị rootAVD tool...")
+    if not setup_rootavd():
+        show_root_troubleshooting()
+        return False
+
+    print("\n[2/3] Tìm ramdisk.img...")
+    api = avd_info['api_level']
+    arch = avd_info['arch']
+    ramdisk = find_ramdisk_img(api, arch)
+
+    if not ramdisk:
+        print(f"    ✗ Không tìm thấy ramdisk.img cho API {api}/{arch}")
+        all_ramdisks = glob.glob(os.path.join(ANDROID_SDK, "system-images", "*", "*", "*", "ramdisk.img"))
+        if all_ramdisks:
+            print("\n    Ramdisk images có sẵn trong SDK:")
+            for r in all_ramdisks:
+                print(f"      → {os.path.relpath(r, ANDROID_SDK)}")
+        show_root_troubleshooting()
+        return False
+
+    rel_ramdisk = os.path.relpath(ramdisk, ANDROID_SDK)
+    print(f"    ✓ Found: {rel_ramdisk}")
+
+    print("\n[3/3] Patch ramdisk với Magisk (rootAVD)...")
+    print("    ⏳ Quá trình này có thể mất 1-3 phút...\n")
+
     try:
-        # Tạo thư mục Magisk
-        run_adb(['shell', 'mkdir', '-p', '/data/adb/magisk'])
-        
-        # Tạo file magisk.db (database Magisk)
-        magisk_init_script = '''#!/system/bin/sh
-MAGISKBIN=/data/adb/magisk
-mkdir -p $MAGISKBIN
+        env = {**os.environ, 'ANDROID_HOME': ANDROID_SDK, 'ANDROID_SDK_ROOT': ANDROID_SDK}
+        process = subprocess.run(
+            ['bash', 'rootAVD.sh', ramdisk],
+            cwd=ROOTAVD_DIR, timeout=300, env=env
+        )
 
-# Tạo magisk binary
-cat > $MAGISKBIN/magisk <<'EOF'
-#!/system/bin/sh
-# Magisk stub
-exec sh "$@"
-EOF
+        if process.returncode != 0:
+            print("\n    ✗ rootAVD patch thất bại!")
+            print("\n    Thử chạy thủ công:")
+            print(f"      cd {ROOTAVD_DIR}")
+            print(f"      ./rootAVD.sh {ramdisk}")
+            show_root_troubleshooting()
+            return False
 
-chmod 755 $MAGISKBIN/magisk
-
-# Tạo su binary
-cat > $MAGISKBIN/su <<'EOF'
-#!/system/bin/sh
-# Root shell
-exec /system/bin/sh
-EOF
-
-chmod 755 $MAGISKBIN/su
-
-# Symlink
-ln -sf $MAGISKBIN/su /system/xbin/su 2>/dev/null || true
-ln -sf $MAGISKBIN/magisk /sbin/magisk 2>/dev/null || true
-
-echo "Magisk installed"
-'''
-        
-        with tempfile.NamedTemporaryFile('w', delete=False, suffix='.sh') as f:
-            f.write(magisk_init_script)
-            init_script = f.name
-        
-        run_adb(['push', init_script, '/data/local/tmp/magisk_init.sh'])
-        run_adb(['shell', 'chmod', '755', '/data/local/tmp/magisk_init.sh'])
-        run_adb(['root'])
-        run_adb(['shell', 'sh', '/data/local/tmp/magisk_init.sh'])
-        
-        os.unlink(init_script)
-        
-        print("    ✓ Magisk đã được cài đặt!")
-        return True
-        
-    except Exception as e:
-        print(f"\033[91m✗ Lỗi cài Magisk: {e}\033[0m")
+    except subprocess.TimeoutExpired:
+        print("\n    ✗ rootAVD timeout (>5 phút)")
         return False
+    except Exception as e:
+        print(f"\n    ✗ Lỗi: {e}")
+        show_root_troubleshooting()
+        return False
+
+    print("\n    ✓ Ramdisk đã được patch với Magisk!")
+
+    avd_name = avd_info['avd_name'].split('\n')[0].strip()
+    print(f"\n    ⚠ Cần restart emulator (cold boot) để kích hoạt root")
+    restart = input(f"\n    Restart AVD '{avd_name}' ngay? [Y/n]: ").strip()
+
+    if restart.lower() == 'n':
+        print(f"\n    → Restart thủ công:")
+        print(f"      {EMULATOR_PATH} -avd {avd_name} -no-snapshot-load")
+        print("    → Sau đó chạy lại kiểm tra root (option 2)")
+        return True
+
+    print("\n    → Tắt emulator...")
+    run_adb(['emu', 'kill'])
+    time.sleep(5)
+
+    print(f"    → Khởi động AVD: {avd_name} (cold boot)...")
+    subprocess.Popen(
+        [EMULATOR_PATH, '-avd', avd_name, '-no-snapshot-load'],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+
+    print("    → Chờ thiết bị khởi động...")
+    for i in range(24):
+        time.sleep(5)
+        try:
+            boot = run_adb(['shell', 'getprop', 'sys.boot_completed'], capture=True)
+            if boot and boot.strip() == '1':
+                print("    ✓ Thiết bị đã khởi động!")
+                break
+        except Exception:
+            pass
+        print(f"    ⏳ Đang chờ... ({(i+1)*5}s)")
+    else:
+        print("    ⚠ Timeout chờ thiết bị (>2 phút)")
+        print("    → Chờ boot xong rồi chạy lại kiểm tra root")
+        return False
+
+    time.sleep(5)
+
+    if check_root_status():
+        print_root_success("rootAVD + Magisk")
+        return True
+
+    print("\n\033[1;33m⚠ Root setup xong nhưng chưa verify được\033[0m")
+    print("    → Mở app Magisk trên thiết bị")
+    print("    → Nếu Magisk yêu cầu setup thêm, làm theo hướng dẫn")
+    print("    → Sau đó chạy lại kiểm tra root (option 2)")
+    return False
+
 
 def auto_root_avd():
-    """Auto root AVD với tmpfs overlay - Bypass read-only system"""
+    """Auto root AVD — detects build type and uses the appropriate method"""
     print("\n" + "="*60)
     print("\033[1;36m         AUTO ROOT AVD WITH MAGISK\033[0m")
     print("="*60)
-    
-    # Kiểm tra thiết bị
+
     if not is_device_connected():
         print("\033[91m✗ Không tìm thấy thiết bị!\033[0m")
         return False
-    
-    # Kiểm tra đã root chưa
+
     if check_root_status():
         print("\n\033[1;32m✓ Thiết bị đã ROOT rồi! Không cần làm gì thêm.\033[0m")
         return True
-    
-    # Lấy thông tin AVD
+
     avd_info = get_avd_info()
     if avd_info:
         print(f"\n[INFO] AVD: {avd_info['avd_name']}")
         print(f"[INFO] API Level: {avd_info['api_level']}")
         print(f"[INFO] Architecture: {avd_info['arch']}")
-    
-    # Restart ADB với quyền root
-    print("\n[1/4] Restart ADB với quyền root...")
-    try:
-        run_adb(['root'])
-        time.sleep(2)
-        print("    ✓ ADB root mode: ON")
-    except:
-        print("    ! ADB root không khả dụng")
-    
-    # Cài đặt Magisk
-    print("\n[2/4] Tải và cài đặt Magisk...")
-    magisk_versions = ["27.0", "26.4", "26.1"]
-    magisk_apk = None
-    
-    for ver in magisk_versions:
-        magisk_apk = download_magisk(ver)
-        if magisk_apk:
-            break
-    
-    if not magisk_apk:
-        print("\033[91m✗ Không thể tải Magisk!\033[0m")
-        return False
-    
-    # Push Magisk APK
-    print("\n[3/4] Cài đặt Magisk APK...")
-    run_adb(['push', magisk_apk, '/data/local/tmp/magisk.apk'])
-    run_adb(['install', '-r', magisk_apk])
-    print("    ✓ Magisk APK đã cài!")
-    
-    # Setup su với tmpfs overlay (bypass read-only)
-    print("\n[4/4] Setup ROOT với tmpfs overlay...")
-    
-    root_setup_script = '''#!/system/bin/sh
-set -e
 
-echo "[+] Chuẩn bị Magisk binaries..."
-cd /data/local/tmp
-mkdir -p magisk_extract
+    build_type = run_adb(['shell', 'getprop', 'ro.build.type'], capture=True) or ""
+    build_tags = run_adb(['shell', 'getprop', 'ro.build.tags'], capture=True) or ""
+    is_production = (build_type == 'user' and 'release-keys' in build_tags)
 
-# Extract Magisk từ APK
-unzip -o magisk.apk -d magisk_extract >/dev/null 2>&1
+    print(f"\n[INFO] Build type: {build_type}")
+    print(f"[INFO] Build tags: {build_tags}")
 
-# Tìm magisk binary (tùy architecture)
-MAGISK_BIN=""
-if [ -f "magisk_extract/lib/arm64-v8a/libmagisk64.so" ]; then
-    MAGISK_BIN="magisk_extract/lib/arm64-v8a/libmagisk64.so"
-elif [ -f "magisk_extract/lib/armeabi-v7a/libmagisk32.so" ]; then
-    MAGISK_BIN="magisk_extract/lib/armeabi-v7a/libmagisk32.so"
-elif [ -f "magisk_extract/lib/x86_64/libmagisk64.so" ]; then
-    MAGISK_BIN="magisk_extract/lib/x86_64/libmagisk64.so"
-elif [ -f "magisk_extract/lib/x86/libmagisk32.so" ]; then
-    MAGISK_BIN="magisk_extract/lib/x86/libmagisk32.so"
-fi
+    if is_production:
+        print("\n\033[1;33m[!] Production build detected (Google Play image)\033[0m")
+        print("    → adb root không khả dụng trên image này")
+        print("    → Sử dụng rootAVD để patch ramdisk với Magisk\n")
+        return root_via_rootavd(avd_info)
+    else:
+        print("\n\033[1;32m[✓] Userdebug/eng build detected\033[0m")
+        print("    → Root qua adb root\n")
+        return root_via_adb_root(avd_info)
 
-if [ -z "$MAGISK_BIN" ]; then
-    echo "✗ Không tìm thấy Magisk binary!"
-    exit 1
-fi
 
-# Copy Magisk binary
-mkdir -p /data/adb/magisk
-cp "$MAGISK_BIN" /data/adb/magisk/magisk
-chmod 755 /data/adb/magisk/magisk
+def print_root_success(method=""):
+    """Print root success banner"""
+    print("\n" + "="*60)
+    print(f"\033[1;32m     ✓✓✓ ROOT THÀNH CÔNG! ({method}) ✓✓✓\033[0m")
+    print("="*60)
+    print("\n\033[1;36mCách sử dụng:\033[0m")
+    print("  • adb shell su -c '<command>'")
+    print("  • adb shell /data/local/tmp/su -c '<command>'")
+    print("  • Frida: frida -U -f <package>")
+    if 'rootAVD' in method:
+        print("\n\033[1;33m⚠ Lưu ý:\033[0m")
+        print("  • Root persist qua reboot (ramdisk đã patch)")
+        print("  • Mở Magisk app để quản lý root permissions")
+    else:
+        print("\n\033[1;33m⚠ Lưu ý:\033[0m")
+        print("  • Cần chạy 'adb root' mỗi khi restart emulator")
+        print("  • Hoặc chạy lại option 1 để setup lại")
 
-echo "[+] Tạo su wrapper..."
-# Tạo su script (không cần modify /system)
-cat > /data/adb/magisk/su << 'EOF'
-#!/system/bin/sh
-# Magisk su wrapper
-if [ "$1" = "0" ]; then
-    shift
-    exec sh 0 "$*"
-elif [ "$1" = "0" ]; then
-    shift
-    exec sh "$@"
-else
-    exec sh "$@"
-fi
-EOF
-
-chmod 755 /data/adb/magisk/su
-
-# Symlink vào PATH (dùng /sbin nếu có, không thì /data/local/tmp)
-if [ -d "/sbin" ] && [ -w "/sbin" ]; then
-    ln -sf /data/adb/magisk/su /sbin/su 2>/dev/null || true
-fi
-
-# Tạo su trong /data/local/tmp (luôn accessible)
-ln -sf /data/adb/magisk/su /data/local/tmp/su
-
-# Thêm vào PATH environment
-echo 'export PATH=/data/adb/magisk:/data/local/tmp:$PATH' > /data/local/tmp/magisk_env.sh
-
-echo ""
-echo "✅ ROOT SETUP HOÀN TẤT!"
-echo "   → su binary: /data/adb/magisk/su"
-echo "   → Alias: /data/local/tmp/su"
-echo ""
-echo "Test: adb shell /data/local/tmp/su 0 id"
-'''
-    
-    # Tạo và chạy script
-    with tempfile.NamedTemporaryFile('w', delete=False, suffix='.sh') as f:
-        f.write(root_setup_script)
-        setup_script = f.name
-    
-    try:
-        run_adb(['push', setup_script, '/data/local/tmp/root_setup.sh'])
-        run_adb(['shell', 'chmod', '755', '/data/local/tmp/root_setup.sh'])
-        run_adb(['shell', 'sh', '/data/local/tmp/root_setup.sh'])
-        
-        os.unlink(setup_script)
-        
-        print("\n    ✓ Root setup script đã chạy!")
-        
-        # Test root
-        print("\n[+] Kiểm tra root access...")
-        test_result = run_adb(['shell', '/data/local/tmp/su', '0', 'id'], capture=True)
-        
-        if test_result and 'uid=0' in test_result:
-            print("\n" + "="*60)
-            print("\033[1;32m         ✓✓✓ ROOT THÀNH CÔNG! ✓✓✓\033[0m")
-            print("="*60)
-            print(f"\n{test_result}")
-            print("\n\033[1;36mCách sử dụng:\033[0m")
-            print("  • adb shell /data/local/tmp/su 0 <command>")
-            print("  • adb shell su 0 <command>  (nếu /sbin có sẵn)")
-            print("  • Frida với option --realm native")
-            print("\n\033[1;33m⚠ Lưu ý:\033[0m")
-            print("  • Root bằng tmpfs overlay → mất khi reboot")
-            print("  • Chạy lại script này sau mỗi lần reboot")
-            print("  • Không cần reboot ngay bây giờ!")
-            return True
-        else:
-            print("\033[93m⚠ Root test không thành công\033[0m")
-            print(f"Output: {test_result}")
-            
-            # Thử phương pháp khác
-            print("\n[+] Thử phương pháp thay thế...")
-            return try_alternative_root()
-            
-    except Exception as e:
-        print(f"\033[91m✗ Lỗi: {e}\033[0m")
-        return try_alternative_root()
-
-def try_alternative_root():
-    """Phương pháp root thay thế cho các AVD khó tính"""
-    print("\n[METHOD 2] Dùng su stub đơn giản...")
-    
-    # Tạo su stub đơn giản nhất
-    simple_su = '''#!/system/bin/sh
-# Simple su stub - chạy commands dưới quyền adb root
-if [ "$1" = "0" ]; then
-    shift
-    exec sh 0 "$*"
-elif [ "$1" = "0" ]; then
-    shift  
-    exec sh "$@"
-else
-    exec sh "$@"
-fi
-'''
-    
-    try:
-        with tempfile.NamedTemporaryFile('w', delete=False) as f:
-            f.write(simple_su)
-            su_stub = f.name
-        
-        run_adb(['push', su_stub, '/data/local/tmp/su'])
-        run_adb(['shell', 'chmod', '755', '/data/local/tmp/su'])
-        
-        os.unlink(su_stub)
-        
-        # Test
-        test = run_adb(['shell', '/data/local/tmp/su', '0', 'id'], capture=True)
-        if test and 'uid=' in test:
-            print("\n" + "="*60)
-            print("\033[1;32m         ✓ ROOT METHOD 2 THÀNH CÔNG!\033[0m")
-            print("="*60)
-            print(f"\n{test}")
-            print("\n\033[1;36mSử dụng:\033[0m")
-            print("  • adb shell /data/local/tmp/su 0 <command>")
-            print("\n\033[1;33mLưu ý: Đây là su stub đơn giản, đủ cho Frida & tools\033[0m")
-            return True
-        else:
-            print("\033[91m✗ Method 2 cũng thất bại\033[0m")
-            show_root_troubleshooting()
-            return False
-            
-    except Exception as e:
-        print(f"\033[91m✗ Lỗi: {e}\033[0m")
-        show_root_troubleshooting()
-        return False
 
 def show_root_troubleshooting():
     """Hiển thị hướng dẫn troubleshooting"""
@@ -485,22 +439,21 @@ def show_root_troubleshooting():
     print("="*60)
     print("\n\033[1;36m1. AVD Image không phù hợp:\033[0m")
     print("   → Tạo AVD mới với: Google APIs (KHÔNG phải Google Play)")
-    print("   → Target: Android 9-11 (API 28-30) root dễ nhất")
+    print("   → Target: Android 9-13 (API 28-33) root dễ nhất")
     print("   → Hardware: x86_64 hoặc arm64-v8a")
-    
-    print("\n\033[1;36m2. Alternative: Dùng emulator khác\033[0m")
-    print("   → Nox Player: Root có sẵn")
-    print("   → LDPlayer: Root có sẵn")
-    print("   → Genymotion: Hỗ trợ root tốt")
-    
-    print("\n\033[1;36m3. Thử root thủ công:\033[0m")
-    print("   → Download SuperSU/Magisk APK")
-    print("   → Cài trực tiếp trong emulator")
-    print("   → Settings > Developer > Root access > Apps and ADB")
-    
-    print("\n\033[1;36m4. Workaround cho Frida:\033[0m")
-    print("   → Dùng: frida -U --no-pause -f <app>")
-    print("   → Không cần root cho attach debuggable apps")
+
+    print("\n\033[1;36m2. rootAVD thủ công:\033[0m")
+    print(f"   → cd {ROOTAVD_DIR}")
+    print("   → ./rootAVD.sh <path/to/ramdisk.img>")
+    print("   → Restart emulator với cold boot")
+
+    print("\n\033[1;36m3. Alternative emulators:\033[0m")
+    print("   → Genymotion: Hỗ trợ root tốt nhất")
+    print("   → Nox Player / LDPlayer: Root có sẵn")
+
+    print("\n\033[1;36m4. Workaround cho Frida (không cần root):\033[0m")
+    print("   → frida -U --no-pause -f <app>  (debuggable apps)")
+    print("   → objection -g <app> explore")
     print("="*60)
 
 
@@ -745,12 +698,29 @@ def frida_server_install():
         with open(local_file, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
-        
         # Giải nén trên macOS
         import lzma
         with lzma.open(local_file, 'rb') as compressed:
             with open(local_file.replace('.xz', ''), 'wb') as decompressed:
                 decompressed.write(compressed.read())
+        
+        # Kiểm tra file đã tải có phải là executable không
+        file_info = subprocess.check_output(
+            ["file", local_file.replace(".xz", "")],
+            text=True
+        )
+
+        print("Binary info:", file_info)
+
+        if "ELF" not in file_info:
+            print("❌ File không phải ELF binary!")
+            return
+
+        if "aarch64" not in file_info and "ARM aarch64" not in file_info:
+            print("❌ Kiến trúc binary không đúng!")
+            return
+
+        print("✓ Frida binary hợp lệ")
         
         # Push lên thiết bị
         run_adb(['push', local_file.replace('.xz', ''), '/data/local/tmp/frida-server'])
@@ -772,9 +742,19 @@ def run_frida_server():
     run_adb(['shell', 'su', '0', 'killall', 'frida-server'], capture=True)
     
     # Chạy frida-server
-    subprocess.Popen([ADB_PATH, 'shell', 'su', '0', '/data/local/tmp/frida-server &'])
+    # subprocess.Popen([ADB_PATH, 'shell', 'su', '0', '/data/local/tmp/frida-server &'])
+    run_adb(['shell','su','0','nohup','/data/local/tmp/frida-server','>','/dev/null','2>&1','&'])
     time.sleep(2)
     print("✓ Frida Server đang chạy!")
+    
+    time.sleep(2)
+
+    check = run_adb(['shell','netstat','-tulpn'],capture=True)
+
+    if check and "27042" in check:
+        print("✓ Frida server running on port 27042")
+    else:
+        print("❌ Frida server failed to start")
 
 def remove_bloatware():
     print("Xóa bloatware (cần root)...")
@@ -858,7 +838,7 @@ if __name__ == "__main__":
                 print("4. Quay lại")
                 t = input("Chọn: ")
                 if t == "1":
-                    install_tool_pip("frida-tools") if not is_tool_installed("frida") else print("Frida đã cài.")
+                    install_tool_pip("frida-tools==12.3.0") if not is_tool_installed("frida") else print("Frida đã cài.")
                 elif t == "2":
                     install_tool_pip("objection") if not is_tool_installed("objection") else print("Objection đã cài.")
                 elif t == "3":

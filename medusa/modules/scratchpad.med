@@ -1,0 +1,7 @@
+{
+    "Name": "scratchpad",
+    "Description": "Use this module to add your hooks",
+    "Help": "N/A",
+    "Code": "\nconsole.log(\"-----------dumping:'com.qualgo.kchat.dev'-------------------\");\nconsole.log(describeJavaClass('com.qualgo.kchat.dev'));\nconsole.log(\"-----------End of dumping:'com.qualgo.kchat.dev'------------\");",
+    "Options": null
+}
