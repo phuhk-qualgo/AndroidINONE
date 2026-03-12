@@ -40,7 +40,7 @@ SECRET_PATTERNS = {
     "Generic Secret": r"(?i)(secret|private_key|client_secret)\s*[=:]\s*['\"][^\s'\"]{8,}['\"]",
     "Private Key PEM": r"-----BEGIN (RSA |EC |DSA )?PRIVATE KEY-----",
     "Base64 JWT": r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
-    "Hardcoded IP": r"\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b",
+    "Hardcoded IP": r"\b(?!0\.0\.0\.0\b)(?!127\.\d)(?!255\.255\.255\.255\b)(?!10\.\d)(?!172\.(?:1[6-9]|2\d|3[01])\.)(?!192\.168\.)(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\b",
     "URL with Credentials": r"https?://[^/\s:]+:[^/\s@]+@[^/\s]+",
     "Slack Webhook": r"https://hooks\.slack\.com/services/T[a-zA-Z0-9_]{8}/B[a-zA-Z0-9_]{8}/[a-zA-Z0-9_]{24}",
     "GitHub Token": r"gh[pousr]_[A-Za-z0-9_]{36,}",
@@ -64,7 +64,7 @@ INSECURE_CODE_PATTERNS = {
     "Weak hash (MD5)": r"MessageDigest\.getInstance\s*\(\s*[\"']MD5[\"']\s*\)",
     "Weak hash (SHA1)": r"MessageDigest\.getInstance\s*\(\s*[\"']SHA-?1[\"']\s*\)",
     "SQL raw query": r"rawQuery\s*\(|execSQL\s*\(",
-    "Dynamic DEX loading": r"DexClassLoader|PathClassLoader|InMemoryDexClassLoader",
+    "Dynamic DEX loading": r"DexClassLoader|InMemoryDexClassLoader",
     "Reflection usage": r"Class\.forName\s*\(|\.getDeclaredMethod\s*\(",
     "Clipboard access": r"ClipboardManager|setPrimaryClip",
     "Logging sensitive data": r"Log\.(d|v|i|w|e)\s*\(",
@@ -74,8 +74,8 @@ INSECURE_CODE_PATTERNS = {
     "Exported component": r"android:exported\s*=\s*[\"']true[\"']",
     "Intent scheme URL": r"intent://",
     "JavaScript bridge": r"@JavascriptInterface",
-    "Root detection": r"(?i)(su|supersu|superuser|magisk|rootbeer)",
-    "Emulator detection": r"(?i)(goldfish|ranchu|generic.*sdk|emulator|genymotion)",
+    "Root detection": r"(?i)\b(supersu|superuser|magisk|rootbeer|rootcloak|xposed|noshufou|chainfire|topjohnwu)\b|/system/(?:xbin|bin)/su\b",
+    "Emulator detection": r"(?i)\b(goldfish|ranchu|genymotion)\b|Build\.\w+\.contains\(.*(?:sdk|emulator)",
 }
 
 
@@ -435,24 +435,55 @@ class APKAnalyzer:
             strings = self._extract_dex_strings(data)
             result.dex_strings.extend(strings[:500])
 
+            _CRITICAL_SECRETS = {"AWS Access Key", "AWS Secret Key", "Private Key PEM",
+                                  "GitHub Token", "Stripe Key", "Azure Storage Key"}
+            _HIGH_SECRETS = {"Google API Key", "Firebase API Key", "Generic API Key",
+                             "Generic Secret", "Base64 JWT", "URL with Credentials",
+                             "Slack Webhook", "Telegram Bot Token", "SendGrid API Key",
+                             "Twilio API Key", "Mailgun API Key", "Heroku API Key", "MongoDB URI"}
+            _IP_FP = re.compile(
+                r"(?i)"
+                r"sip:|SIP/2\.0"                                  # SIP protocol
+                r"|RFC\d{3,}"                                     # RFC references
+                r"|\d+\.\d+\.\d+\.\d+\.\d+"                      # OIDs (5+ dotted segments)
+                r"|P-Charging|P-Visited|P-Preferred|P-Access"     # 3GPP headers
+                r"|ccf=|ecf="                                     # Charging-Function fields
+                r"|time\.nist\.gov|ntp\."                         # NTP servers
+                r"|REGISTER\s|SUBSCRIBE\s|NOTIFY\s|PUBLISH\s"     # SIP methods
+            )
+            _MULTI_IP = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+
             for pattern_name, compiled in compiled_secrets.items():
                 found_for_pattern = 0
                 for s in strings:
                     try:
                         if compiled.search(s):
+                            if pattern_name == "Hardcoded IP":
+                                if _IP_FP.search(s):
+                                    continue
+                                if len(_MULTI_IP.findall(s)) >= 2:
+                                    continue
+                            if pattern_name in _CRITICAL_SECRETS:
+                                sev, cvss = "CRITICAL", 9.0
+                            elif pattern_name in _HIGH_SECRETS:
+                                sev, cvss = "HIGH", 7.5
+                            elif pattern_name == "Hardcoded IP":
+                                sev, cvss = "MEDIUM", 4.0
+                            else:
+                                sev, cvss = "HIGH", 7.0
                             result.secrets.append({
                                 "type": pattern_name,
                                 "value": s[:200],
                                 "location": dex_name,
                             })
                             result.findings.append(Finding(
-                                severity="CRITICAL" if "key" in pattern_name.lower() or "private" in pattern_name.lower() else "HIGH",
+                                severity=sev,
                                 category="Hardcoded Secrets",
                                 title=f"{pattern_name} found in {dex_name}",
                                 description=f"Potential secret: {s[:100]}",
                                 location=dex_name,
                                 recommendation="Remove hardcoded secrets; use Android Keystore or env variables",
-                                cvss=8.0,
+                                cvss=cvss,
                             ))
                             found_for_pattern += 1
                             if found_for_pattern >= 5:
@@ -557,14 +588,28 @@ class APKAnalyzer:
                 evidence=", ".join(native_libs[:10]),
             ))
 
+        _BENIGN_ASSETS = {"emoji", "font", "locale", "license", "animation", "lottie",
+                          "i18n", "l10n", "translation", "country", "timezone", "html",
+                          "changelog", "readme", "about", "help", "tutorial", "tos", "privacy"}
+        _SENSITIVE_EXTS = {".db", ".sqlite", ".pem", ".key", ".p12", ".jks", ".keystore", ".bks"}
         asset_files = [n for n in names if n.startswith("assets/")]
         for af in asset_files:
             lower = af.lower()
-            if any(ext in lower for ext in [".db", ".sqlite", ".json", ".xml", ".pem", ".key", ".p12", ".jks"]):
+            base = os.path.basename(lower)
+            if any(b in base for b in _BENIGN_ASSETS):
+                continue
+            if any(ext in lower for ext in _SENSITIVE_EXTS):
                 result.findings.append(Finding(
                     severity="MEDIUM", category="Sensitive Assets",
                     title=f"Sensitive asset: {af}",
-                    description="Asset file may contain sensitive data",
+                    description="Asset file may contain sensitive data (crypto keys, database)",
+                    location=af,
+                ))
+            elif lower.endswith(".json") and any(kw in base for kw in ("config", "secret", "key", "credential", "auth", "api", "server", "endpoint")):
+                result.findings.append(Finding(
+                    severity="MEDIUM", category="Sensitive Assets",
+                    title=f"Potentially sensitive config: {af}",
+                    description="JSON config file may contain API keys or server configuration",
                     location=af,
                 ))
 

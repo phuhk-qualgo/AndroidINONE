@@ -129,16 +129,6 @@ class VulnerabilityScanner:
                     analysis = self.apk_analyzer.analyze(apk_dest)
                     for f in analysis.findings:
                         result.static_findings.append(asdict(f))
-                    for s in analysis.secrets:
-                        result.static_findings.append({
-                            "severity": "CRITICAL",
-                            "category": "Hardcoded Secrets",
-                            "title": s["type"],
-                            "description": f"Found in {s['location']}",
-                            "evidence": s["value"][:100],
-                            "location": s["location"],
-                            "recommendation": "Remove hardcoded secrets; use Android Keystore",
-                        })
                 except Exception:
                     pass
                 await report("static_analysis", 35, f"Found {len(result.static_findings)} static findings")
@@ -258,10 +248,17 @@ class VulnerabilityScanner:
         if not prefs or "No such" in prefs or "not debuggable" in prefs:
             prefs = await self._safe_shell(f"su 0 ls /data/data/{package}/shared_prefs/ 2>/dev/null", timeout=5)
 
+        _SDK_PREFS = {"firebase", "com.google.android.gms", "com.google.firebase",
+                      "com.crashlytics", "com.google.ads", "admob", "analytics",
+                      "google_app_measurement", "FirebasePerf", "FirebaseHeartBeat",
+                      "FirebaseAppHeartBeat"}
+
         if prefs and "No such" not in prefs and "not debuggable" not in prefs:
             for pref_file in prefs.splitlines()[:10]:
                 pref_file = pref_file.strip()
                 if not pref_file or not pref_file.endswith(".xml"):
+                    continue
+                if any(sdk in pref_file for sdk in _SDK_PREFS):
                     continue
                 content = await self._safe_shell(
                     f"run-as {package} cat shared_prefs/{pref_file} 2>/dev/null", timeout=5
@@ -289,10 +286,14 @@ class VulnerabilityScanner:
         dbs = await self._safe_shell(f"run-as {package} ls databases/ 2>/dev/null", timeout=5)
         if not dbs or "No such" in dbs:
             dbs = await self._safe_shell(f"su 0 ls /data/data/{package}/databases/ 2>/dev/null", timeout=5)
+        _SDK_DBS = {"google_app_measurement", "google_analytics", "com.google.android.datatransport",
+                    "google_app_signal", "firebase", "crashlytics"}
         if dbs and "No such" not in dbs:
             for db in dbs.splitlines():
                 db = db.strip()
                 if db and (db.endswith(".db") or db.endswith(".sqlite")):
+                    if any(sdk in db.lower() for sdk in _SDK_DBS):
+                        continue
                     result.dynamic_findings.append({
                         "severity": "MEDIUM",
                         "category": "Insecure Data Storage",

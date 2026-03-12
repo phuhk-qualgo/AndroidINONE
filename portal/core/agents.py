@@ -538,6 +538,11 @@ class OWASPChecker:
 
         return findings
 
+    _SDK_PREF_SKIP = {"firebase", "com.google.android.gms", "com.google.firebase",
+                       "com.crashlytics", "com.google.ads", "admob", "analytics",
+                       "google_app_measurement", "FirebasePerf", "FirebaseHeartBeat",
+                       "FirebaseAppHeartBeat", "com.google.android.datatransport"}
+
     async def _check_storage(self, pkg: str) -> list[dict]:
         findings = []
         sensitive_keys = ["password", "token", "secret", "api_key", "session", "jwt", "cookie", "auth", "credential", "pin"]
@@ -551,6 +556,8 @@ class OWASPChecker:
                 pf = pf.strip()
                 if not pf or not pf.endswith(".xml"):
                     continue
+                if any(sdk in pf for sdk in self._SDK_PREF_SKIP):
+                    continue
                 content = await self._shell(
                     f"run-as {pkg} cat shared_prefs/{pf} 2>/dev/null"
                 )
@@ -560,7 +567,7 @@ class OWASPChecker:
                     for key in sensitive_keys:
                         if key in content.lower():
                             findings.append({
-                                "severity": "CRITICAL", "category": "M2 - Insecure Data Storage",
+                                "severity": "HIGH", "category": "M2 - Insecure Data Storage",
                                 "title": f"Sensitive data '{key}' in SharedPreferences: {pf}",
                                 "description": f"Cleartext sensitive data found in {pf}",
                                 "evidence": content[:200],
