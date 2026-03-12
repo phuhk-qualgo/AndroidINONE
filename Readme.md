@@ -82,7 +82,7 @@ python3 launch_portal.py
 | **Target** | Package explorer → static analysis → full scan → OWASP/Semgrep/Hunter |
 | **Semgrep** | MASVS static analysis with 53 categorized rules |
 | **Drozer** | Component security: auto-setup, connect, run modules, full assessment |
-| **Hunter** | AndroHunter: Intent/Provider/Broadcast fuzzing, FileProvider, StrandHogg, DEX secrets |
+| **Hunter** | AndroHunter: 12 modules – fuzzing, FileProvider, StrandHogg, DEX secrets, SharedPrefs, Manifest, Frida Gen, SSL Bypass, Activity Launcher, Auto ADB |
 | **Frida** | Server management, ADB root, script runner, custom scripts |
 | **Objection** | Persistent session: explore → run commands → stop |
 | **Medusa** | Stash modules → compile → run session (122 modules, 32 categories) |
@@ -95,7 +95,7 @@ python3 launch_portal.py
 
 ## AndroHunter Integration
 
-Full feature parity with [AndroHunter](https://github.com/ynsmroztas/AndroHunter):
+Full feature parity with [AndroHunter](https://github.com/ynsmroztas/AndroHunter) — verified by reverse engineering `AndroHunter-v.apk` with JADX:
 
 | Module | Description |
 |--------|-------------|
@@ -105,7 +105,13 @@ Full feature parity with [AndroHunter](https://github.com/ynsmroztas/AndroHunter
 | **FileProvider Analyzer** | Parse FileProvider XML paths (root/cache/external), 9 path traversal payloads incl. URL-encoded. |
 | **StrandHogg Detector** | Detect StrandHogg 1.0: custom taskAffinity, empty affinity, standard launchMode. |
 | **DEX Secret Scanner** | 19 patterns: API keys, AWS, Firebase, JWT, passwords, IPs, debug flags, SQL queries. VULN/SUSP/INFO. |
-| **Payload Engine** | 7 categories: SQLi (8), XSS (6), LFI (6), Redirect (6), Template (6), CmdI (8), IDOR (9). |
+| **SharedPrefs Reader** | Read SharedPreferences via `run-as`/`su`, flag 15 sensitive key types (token, password, jwt, auth, etc.). |
+| **Manifest Viewer** | Analyze exported components, permissions, debug/backup flags. Risk rules matching original APK. |
+| **Frida Generator** | 6 script templates: SSL Pinning Bypass, Root Detection Bypass, Login Bypass, Crypto Monitor, SQL Monitor, HTTP Intercept. |
+| **SSL Bypass Guide** | 6 methods: Frida codeshare, objection, Magisk TrustMeAlready, NSC patch, Xposed, Burp CA. |
+| **Activity Launcher** | List exported activities, launch with custom data URIs and extras for deep link testing. |
+| **Auto ADB** | 23 predefined commands across 5 categories: App Info, Storage, Network, Security, Logcat. |
+| **Payload Engine** | 7 categories with VULN_PATTERNS: SQLi (8), XSS (6), LFI (6), Redirect (6), Template (6), CmdI (8), IDOR (9). |
 
 ---
 
@@ -128,6 +134,14 @@ Full feature parity with [AndroHunter](https://github.com/ynsmroztas/AndroHunter
 | POST | `/api/agents/hunter/fileprovider/{pkg}` | FileProvider analysis |
 | POST | `/api/agents/hunter/taskhijack/{pkg}` | StrandHogg check |
 | POST | `/api/agents/hunter/dex/{pkg}` | DEX secret scan |
+| POST | `/api/agents/hunter/sharedprefs/{pkg}` | SharedPrefs reader |
+| POST | `/api/agents/hunter/manifest/{pkg}` | Manifest analyzer |
+| GET | `/api/agents/hunter/activities/{pkg}` | List activities |
+| POST | `/api/agents/hunter/launch/{pkg}` | Launch activity |
+| GET | `/api/agents/hunter/frida-templates` | Frida script templates |
+| GET | `/api/agents/hunter/ssl-methods` | SSL bypass guide |
+| GET | `/api/agents/hunter/auto-adb` | Auto ADB commands |
+| POST | `/api/agents/hunter/auto-adb/run` | Run ADB command |
 | POST | `/api/agents/medusa/stash` | Stash a Medusa module |
 | POST | `/api/agents/medusa/compile` | Compile stashed modules |
 | POST | `/api/agents/medusa/run` | Run compiled/single module |
@@ -150,7 +164,7 @@ Full Swagger docs at `http://localhost:1337/docs`.
 
 | Tool | Integration Level |
 |------|------------------|
-| **AndroHunter** | Full: 6 modules, Payload Engine, VULN/SUSP/SAFE classification |
+| **AndroHunter** | Full: 12 modules (verified via APK reverse engineering), Payload Engine, VULN/SUSP/SAFE classification |
 | **Frida** | Full: server lifecycle, script injection, process listing |
 | **Objection** | Full: persistent session, all commands |
 | **Medusa** | Full: 122 modules, stash/compile/run workflow |
