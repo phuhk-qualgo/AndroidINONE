@@ -289,6 +289,7 @@ async function pgHunter(mc){
         <button class="btn btn-accent" onclick="hunterMod('fileprovider')">FileProvider</button>
         <button class="btn btn-accent" onclick="hunterMod('taskhijack')">StrandHogg</button>
         <button class="btn btn-accent" onclick="hunterMod('dex')">DEX Secrets</button>
+        <button class="btn btn-accent" onclick="hunterMod('source-scan')">Source Scan</button>
         <button class="btn btn-accent" onclick="hunterMod('sharedprefs')">SharedPrefs</button>
         <button class="btn btn-accent" onclick="hunterMod('manifest')">Manifest</button>
       </div>
@@ -332,9 +333,10 @@ async function pgHunter(mc){
         <tr><td><strong style="font-size:11px">Broadcast Fuzzer</strong></td><td style="font-size:11px;color:var(--t2)">10 broadcast payloads across 6 categories: Auth bypass, SQLi, LFI, Redirect, PrivEsc, Exfil.</td></tr>
         <tr><td><strong style="font-size:11px">FileProvider</strong></td><td style="font-size:11px;color:var(--t2)">Parse FileProvider XML paths (root/cache/external), 9 path traversal payloads incl. URL-encoded.</td></tr>
         <tr><td><strong style="font-size:11px">StrandHogg</strong></td><td style="font-size:11px;color:var(--t2)">Detect StrandHogg 1.0: custom taskAffinity, empty affinity, standard launchMode.</td></tr>
-        <tr><td><strong style="font-size:11px">DEX Secrets</strong></td><td style="font-size:11px;color:var(--t2)">19 patterns: API keys, AWS, Firebase, JWT, passwords, IPs, debug flags, SQL queries. VULN/SUSP/INFO.</td></tr>
+        <tr><td><strong style="font-size:11px">DEX Secrets</strong></td><td style="font-size:11px;color:var(--t2)">21 secret patterns + 20 code-level patterns: crypto keys, zero IV, WebView JS, MODE_WORLD_READABLE, DefaultHttpClient, SMS, broadcasts, backdoors.</td></tr>
+        <tr><td><strong style="font-size:11px">Source Scan</strong></td><td style="font-size:11px;color:var(--t2)">Decompile APK with jadx and scan Java source with full context. 20 code vuln patterns + 21 secret patterns with line-level precision.</td></tr>
         <tr><td><strong style="font-size:11px">SharedPrefs</strong></td><td style="font-size:11px;color:var(--t2)">Read SharedPreferences files and flag 15 sensitive key types: token, password, secret, auth, jwt, etc.</td></tr>
-        <tr><td><strong style="font-size:11px">Manifest</strong></td><td style="font-size:11px;color:var(--t2)">Analyze exported components, permissions, debug/backup flags. HIGH/MEDIUM/INFO severity rules.</td></tr>
+        <tr><td><strong style="font-size:11px">Manifest</strong></td><td style="font-size:11px;color:var(--t2)">Exported components, permissions, debug/backup/cleartext flags, targetSdkVersion check, SMS/phone/location/contact permission analysis.</td></tr>
         <tr><td><strong style="font-size:11px">Frida Generator</strong></td><td style="font-size:11px;color:var(--t2)">6 templates: SSL Bypass, Root Bypass, Login Bypass, Crypto Monitor, SQL Monitor, HTTP Intercept.</td></tr>
         <tr><td><strong style="font-size:11px">SSL Bypass</strong></td><td style="font-size:11px;color:var(--t2)">6 methods: Frida codeshare, objection, Magisk, NSC patch, Xposed, Burp CA manual install.</td></tr>
         <tr><td><strong style="font-size:11px">Activity Launcher</strong></td><td style="font-size:11px;color:var(--t2)">List and launch activities with custom data URIs and extras for deep link testing.</td></tr>
@@ -358,7 +360,7 @@ async function hunterFull(){
   if(!r?.success&&(r?.detail||r?.error)){d.innerHTML=`<div class="card" style="border-left:3px solid var(--red)">${esc(r.detail||r.error)}</div>`;return}
   const findings=r?.findings||[];
   const mods=r?.modules||{};
-  const modNames={intent_fuzzer:'Intent Fuzzer',provider_fuzzer:'Provider Fuzzer',broadcast_fuzzer:'Broadcast Fuzzer',fileprovider:'FileProvider',task_hijack:'StrandHogg',dex_secrets:'DEX Secrets',shared_prefs:'SharedPrefs',manifest:'Manifest'};
+  const modNames={intent_fuzzer:'Intent Fuzzer',provider_fuzzer:'Provider Fuzzer',broadcast_fuzzer:'Broadcast Fuzzer',fileprovider:'FileProvider',task_hijack:'StrandHogg',dex_secrets:'DEX Secrets',shared_prefs:'SharedPrefs',manifest:'Manifest',source_scan:'Source Scan'};
   const crit=findings.filter(f=>f.severity==='CRITICAL').length;
   const high=findings.filter(f=>f.severity==='HIGH').length;
   const med=findings.filter(f=>f.severity==='MEDIUM').length;

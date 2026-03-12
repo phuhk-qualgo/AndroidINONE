@@ -1451,7 +1451,10 @@ DEX_SECRET_PATTERNS = {
     "Google API Key": (r"AIza[0-9A-Za-z_-]{35}", "VULN"),
     "Firebase URL": (r"https://[a-z0-9\-]+\.firebaseio\.com", "SUSP"),
     "Private Key": (r"-----BEGIN\s(?:RSA\s|EC\s|DSA\s|OPENSSH\s)?PRIVATE\sKEY-----", "VULN"),
-    "Hardcoded Password": (r'(?i)(?:password|passwd|pwd)[=:\s"\']+ *[^\s"\']{6,}', "VULN"),
+    "Hardcoded Password": (r'(?i)(?:password|passwd|pwd)\s*[=:]\s*["\']([^"\'\n]{6,})["\']', "VULN"),
+    "Hardcoded Crypto Key": (r'(?i)(?:secret[_\s]?key|encryption[_\s]?key|aes[_\s]?key|crypto[_\s]?key|(?:private|symmetric)[_\s]?key)\s*[=:]\s*["\']([^"\']{8,})["\']', "VULN"),
+    "Hardcoded Key String": (r'(?i)(?:This is the (?:super )?secret|my secret key|encrypt(?:ion)? key|master key|private key)[^"\n]{0,40}', "VULN"),
+    "Developer Backdoor Account": (r'\b(?:devadmin|testadmin|backdoor|debuguser|rootuser|masterkey)\b', "VULN"),
     "Generic API Key": (r'(?i)(?:api[_\-]?key|apikey)\s*[=:]\s*["\']([A-Za-z0-9_\-]{16,})["\']', "SUSP"),
     "Generic Token": (r'(?i)(?:token|secret)\s*[=:]\s*["\']([^\s"\']{8,})["\']', "SUSP"),
     "Hardcoded URL with Credentials": (r"https?://[^\s:]+:[^\s@]+@[^\s]+", "VULN"),
@@ -1463,6 +1466,234 @@ DEX_SECRET_PATTERNS = {
     "Internal IP Address": (r"(?:192\.168\.|10\.|172\.1[6-9]\.)\d+\.\d+(?::\d+)?", "SUSP"),
     "Debug Flag": (r'(?i)(?:debug|staging|dev)[_\-]?(?:mode|url|host)[=:\s"\']+ *true', "SUSP"),
     "SQL Query": (r"SELECT .{1,50} FROM ", "INFO"),
+}
+
+# Code-level vulnerability patterns for DEX deep scanning (detects insecure API usage)
+DEX_CODE_PATTERNS = {
+    "WebView JavaScript Enabled": {
+        "pattern": r"setJavaScriptEnabled",
+        "severity": "HIGH",
+        "category": "Insecure WebView",
+        "title": "WebView JavaScript enabled",
+        "description": "JavaScript enabled in WebView allows XSS attacks, especially when loading untrusted content",
+        "recommendation": "Disable JavaScript in WebView or validate all loaded content",
+    },
+    "WebView SaveFormData": {
+        "pattern": r"setSaveFormData",
+        "severity": "MEDIUM",
+        "category": "Insecure WebView",
+        "title": "WebView saves form data",
+        "description": "WebView stores form data including sensitive inputs",
+        "recommendation": "Disable setSaveFormData for WebViews handling sensitive data",
+    },
+    "WebView File Access": {
+        "pattern": r"setAllowFileAccess(?:FromFileURLs)?|setAllowUniversalAccessFromFileURLs",
+        "severity": "HIGH",
+        "category": "Insecure WebView",
+        "title": "WebView file access enabled",
+        "description": "WebView can access local file system, enabling data theft",
+        "recommendation": "Disable file access in WebView settings",
+    },
+    "MODE_WORLD_READABLE": {
+        "pattern": r"MODE_WORLD_READABLE|getSharedPreferences\([^,]+,\s*1\s*\)",
+        "severity": "CRITICAL",
+        "category": "Insecure Data Storage",
+        "title": "World-readable SharedPreferences",
+        "description": "SharedPreferences created with MODE_WORLD_READABLE (1) — any app on the device can read stored data",
+        "recommendation": "Use MODE_PRIVATE (0) for SharedPreferences. Use EncryptedSharedPreferences for sensitive data.",
+    },
+    "MODE_WORLD_WRITEABLE": {
+        "pattern": r"MODE_WORLD_WRITEABLE|getSharedPreferences\([^,]+,\s*2\s*\)",
+        "severity": "CRITICAL",
+        "category": "Insecure Data Storage",
+        "title": "World-writeable SharedPreferences",
+        "description": "SharedPreferences created with MODE_WORLD_WRITEABLE (2) — any app can modify stored data",
+        "recommendation": "Use MODE_PRIVATE (0) for SharedPreferences",
+    },
+    "External Storage Write": {
+        "pattern": r"getExternalStorageDirectory|getExternalFilesDir|EXTERNAL_STORAGE",
+        "severity": "MEDIUM",
+        "category": "Insecure Data Storage",
+        "title": "Data written to external storage",
+        "description": "External storage is world-readable; sensitive data may be exposed to other apps",
+        "recommendation": "Use internal storage (getFilesDir) for sensitive data",
+    },
+    "Logging Sensitive Data": {
+        "pattern": r'Log\.[dviewe]\([^)]*(?:password|passwd|token|secret|credential|session|key)[^)]*\)',
+        "severity": "HIGH",
+        "category": "Information Leakage",
+        "title": "Sensitive data in Log calls",
+        "description": "Logging sensitive information (password, token, secret) to logcat where other apps can read it",
+        "recommendation": "Remove sensitive logging in production builds. Use ProGuard to strip Log calls.",
+    },
+    "Log Sensitive Login": {
+        "pattern": r'Successful Login:|password is:|phonenumber:|newpassword=',
+        "severity": "HIGH",
+        "category": "Information Leakage",
+        "title": "Sensitive data in log strings",
+        "description": "Log messages containing credentials or personal data appear in logcat",
+        "recommendation": "Remove sensitive logging from production builds",
+    },
+    "System.out with Sensitive Data": {
+        "pattern": r'System\.out\.println\([^)]*(?:password|passwd|newpass|token|secret|credential|phoneno|phone)[^)]*\)',
+        "severity": "HIGH",
+        "category": "Information Leakage",
+        "title": "Sensitive data in System.out.println",
+        "description": "Printing sensitive data to standard output which appears in logcat",
+        "recommendation": "Remove debug println statements from production code",
+    },
+    "Implicit Broadcast": {
+        "pattern": r"sendBroadcast(?!Sync)",
+        "severity": "HIGH",
+        "category": "Insecure IPC",
+        "title": "Implicit broadcast detected",
+        "description": "sendBroadcast without permission or LocalBroadcastManager allows any app to intercept the data",
+        "recommendation": "Use LocalBroadcastManager or specify permissions in sendBroadcast",
+    },
+    "SMS Send": {
+        "pattern": r"sendTextMessage|SmsManager",
+        "severity": "HIGH",
+        "category": "Insecure Communication",
+        "title": "SMS messaging detected",
+        "description": "App sends SMS which may contain sensitive data and is unencrypted",
+        "recommendation": "Avoid sending sensitive data via SMS. Use encrypted channels.",
+    },
+    "DefaultHttpClient (Deprecated)": {
+        "pattern": r"DefaultHttpClient|BasicHttpParams|AllowAllHostnameVerifier",
+        "severity": "HIGH",
+        "category": "Insecure Communication",
+        "title": "Deprecated HTTP client without cert validation",
+        "description": "DefaultHttpClient is deprecated and lacks proper certificate validation. Vulnerable to MITM.",
+        "recommendation": "Use HttpsURLConnection or OkHttp with proper TLS configuration",
+    },
+    "Zero/Static IV": {
+        "pattern": r"IvParameterSpec\(\s*(?:new\s+byte\[\]\s*\{(?:\s*0\s*,?\s*){4,})|ivBytes\s*=\s*\{(?:\s*0\s*,?\s*){4,}|IvParameterSpec",
+        "severity": "HIGH",
+        "category": "Weak Cryptography",
+        "title": "Static/zero initialization vector (IV)",
+        "description": "Using a static or all-zeros IV with CBC mode defeats the purpose of the IV and enables pattern analysis",
+        "recommendation": "Generate a random IV for each encryption operation using SecureRandom",
+    },
+    "ECB Mode": {
+        "pattern": r'AES/ECB|Cipher\.getInstance\(\s*"AES"\s*\)',
+        "severity": "HIGH",
+        "category": "Weak Cryptography",
+        "title": "ECB mode or bare AES cipher",
+        "description": "ECB mode does not use an IV and produces identical ciphertext for identical plaintext blocks",
+        "recommendation": "Use AES/GCM/NoPadding or AES/CBC/PKCS5Padding with a random IV",
+    },
+    "Hardcoded IV": {
+        "pattern": r'IvParameterSpec\(\s*"[^"]+"\s*\.getBytes',
+        "severity": "HIGH",
+        "category": "Weak Cryptography",
+        "title": "Hardcoded initialization vector",
+        "description": "IV is derived from a hardcoded string, making encryption predictable",
+        "recommendation": "Generate a random IV using SecureRandom for each encryption",
+    },
+    "Insecure Random": {
+        "pattern": r"java\.util\.Random\b",
+        "severity": "MEDIUM",
+        "category": "Weak Cryptography",
+        "title": "java.util.Random used (not cryptographically secure)",
+        "description": "java.util.Random is predictable and unsuitable for cryptographic operations",
+        "recommendation": "Use java.security.SecureRandom for cryptographic purposes",
+    },
+    "TrustAllCertificates": {
+        "pattern": r"X509TrustManager|ALLOW_ALL_HOSTNAME_VERIFIER|TrustAllSSL|NullTrustManager|checkServerTrusted",
+        "severity": "CRITICAL",
+        "category": "Insecure Communication",
+        "title": "Certificate validation disabled",
+        "description": "SSL/TLS certificate validation is bypassed, enabling MITM attacks",
+        "recommendation": "Implement proper certificate validation or use certificate pinning",
+    },
+    "Clipboard Data": {
+        "pattern": r"ClipboardManager|setPrimaryClip",
+        "severity": "MEDIUM",
+        "category": "Information Leakage",
+        "title": "Clipboard access detected",
+        "description": "Data placed on clipboard is accessible to all apps",
+        "recommendation": "Avoid placing sensitive data on clipboard; clear clipboard after use",
+    },
+    "SQL Raw Query": {
+        "pattern": r'rawQuery\(\s*["\'][^"\']*\+|execSQL\(\s*["\'][^"\']*\+',
+        "severity": "HIGH",
+        "category": "SQL Injection",
+        "title": "SQL query with string concatenation",
+        "description": "Building SQL queries via string concatenation enables SQL injection",
+        "recommendation": "Use parameterized queries with selectionArgs",
+    },
+    "Developer Backdoor": {
+        "pattern": r'(?:equals|equalsIgnoreCase)\(\s*"(?:admin|devadmin|testuser|backdoor|debug|root|superuser|master)"',
+        "severity": "CRITICAL",
+        "category": "Developer Backdoor",
+        "title": "Hardcoded privileged account check",
+        "description": "Code checks for hardcoded admin/dev username, indicating a possible backdoor",
+        "recommendation": "Remove all developer backdoor accounts from production builds",
+    },
+    "Base64 Credential Encoding": {
+        "pattern": r'Base64\.(?:encode|decode).*(?:password|username|credential|token|secret)|EncryptedUsername|superSecurePassword',
+        "severity": "HIGH",
+        "category": "Weak Cryptography",
+        "title": "Base64 used for credential encoding (not encryption)",
+        "description": "Base64 is encoding, not encryption. Credentials can be trivially decoded.",
+        "recommendation": "Use proper encryption (AES-GCM) with securely stored keys for sensitive data",
+    },
+    "HTTP Protocol": {
+        "pattern": r'(?:protocol|scheme|url|endpoint|server|host)\s*=\s*"http://',
+        "severity": "HIGH",
+        "category": "Insecure Communication",
+        "title": "Hardcoded HTTP (non-TLS) protocol",
+        "description": "App uses plaintext HTTP instead of HTTPS, enabling network interception",
+        "recommendation": "Use HTTPS for all server communication",
+    },
+    "Path Traversal via Intent": {
+        "pattern": r'getStringExtra\([^)]*\).*(?:new\s+File|loadUrl|openFile|FileWriter|FileReader|FileInputStream|getExternalStorage)',
+        "severity": "HIGH",
+        "category": "Path Traversal",
+        "title": "Unsanitized Intent extra used in file path",
+        "description": "User-controlled string from Intent extras is used directly in file operations without sanitization, enabling directory traversal",
+        "recommendation": "Sanitize file paths: reject ../ sequences, null bytes; use File.getCanonicalPath() and verify prefix",
+    },
+    "Unsanitized File Path": {
+        "pattern": r'(?:getExternalStorageDirectory|getFilesDir|getCacheDir)\(\)[^;]*\+[^;]*(?:uname|username|user|name|param|extra)',
+        "severity": "HIGH",
+        "category": "Path Traversal",
+        "title": "User-controlled value in file path construction",
+        "description": "File path built by concatenating user-controlled input (username/parameter) — path traversal risk",
+        "recommendation": "Validate filename characters, reject path separators and ../ sequences",
+    },
+    "Weak Root Detection": {
+        "pattern": r'(?:Superuser\.apk|/system/xbin/which.*su|/system/bin/su|doesSUexist|doesSuperuserApkExist|isDeviceRooted)',
+        "severity": "MEDIUM",
+        "category": "Weak Protection",
+        "title": "Basic root detection (easily bypassed)",
+        "description": "Root detection relies on simple file/binary checks that can be bypassed with Frida or by hiding root",
+        "recommendation": "Use SafetyNet/Play Integrity API; implement multi-layered detection with integrity checks at multiple app lifecycle points",
+    },
+    "Password Change No Old Password": {
+        "pattern": r'(?:BasicNameValuePair|putExtra|put)\(\s*"(?:newpassword|new_password)"',
+        "severity": "HIGH",
+        "category": "Authentication Flaw",
+        "title": "Password change without requiring old password",
+        "description": "Password change sends only the new password to the server — no old/current password verification, allowing unauthorized password reset",
+        "recommendation": "Always require the current password server-side before allowing password changes",
+    },
+    "Patchable Auth Flag": {
+        "pattern": r'getString\(R\.string\.(?:is_admin|is_root|is_debug|admin_mode|debug_mode)\)|(?:is_admin|isAdmin|is_root|isRoot|admin_mode|debug_mode)\s*[=.]\s*(?:"(?:yes|no|true|false)"|\btrue\b|\bfalse\b)',
+        "severity": "MEDIUM",
+        "category": "Weak Authentication",
+        "title": "Boolean auth/admin flag in resources or code",
+        "description": "Authentication decision based on a patchable string/boolean flag — attacker can recompile APK with flag changed",
+        "recommendation": "Move authorization checks to server-side; never rely on client-side flags for access control",
+    },
+    "Keyboard Cache Risk": {
+        "pattern": r'\(EditText\).*(?:password|Password|account|Account)',
+        "severity": "MEDIUM",
+        "category": "Information Leakage",
+        "title": "Sensitive input field may cache to keyboard",
+        "description": "EditText for sensitive data (password, account) without inputType restriction — keyboard may cache input for autocomplete",
+        "recommendation": "Set android:inputType='textPassword' or 'textNoSuggestions' and android:importantForAutofill='no' on sensitive fields",
+    },
 }
 
 
@@ -1919,6 +2150,10 @@ class AndroHunterAgent:
         if progress_cb:
             await progress_cb("hunter", 75, "Pattern matching...")
 
+        _LIB_DOMAINS = {"schema.org", "googleapis.com", "google.com", "google-analytics.com",
+                        "gstatic.com", "doubleclick.net", "android.com", "xmlpull.org",
+                        "w3.org", "apache.org", "googletagmanager.com"}
+
         seen = set()
         for dex_name, content in dex_strings:
             for label, (pattern, severity_class) in DEX_SECRET_PATTERNS.items():
@@ -1926,6 +2161,8 @@ class AndroHunterAgent:
                     for m in re.finditer(pattern, content):
                         val = m.group(1) if m.lastindex and m.lastindex >= 1 else m.group(0)
                         if not val or len(val) < 8:
+                            continue
+                        if label in ("HTTP Endpoint",) and any(d in val for d in _LIB_DOMAINS):
                             continue
                         key = (label, val[:60])
                         if key in seen:
@@ -1945,13 +2182,40 @@ class AndroHunterAgent:
                             "recommendation": "Remove hardcoded secrets; use Android Keystore or server-side config",
                         })
 
-                        if len(findings) > 100:
+                        if len(findings) > 200:
                             break
                 except Exception:
                     pass
 
         if progress_cb:
-            await progress_cb("hunter", 100, f"DEX scan complete: {len(findings)} secrets")
+            await progress_cb("hunter", 80, "Scanning code-level vulnerabilities...")
+
+        for dex_name, content in dex_strings:
+            for label, info in DEX_CODE_PATTERNS.items():
+                try:
+                    for m in re.finditer(info["pattern"], content):
+                        val = m.group(0)
+                        key = (label, val[:60])
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        findings.append({
+                            "severity": info["severity"],
+                            "category": info["category"],
+                            "title": f"{info['title']} in {dex_name}",
+                            "description": info["description"],
+                            "location": dex_name,
+                            "evidence": val[:300],
+                            "classification": "VULN" if info["severity"] in ("CRITICAL", "HIGH") else "SUSP",
+                            "recommendation": info["recommendation"],
+                        })
+                        if len(findings) > 200:
+                            break
+                except Exception:
+                    pass
+
+        if progress_cb:
+            await progress_cb("hunter", 100, f"DEX scan complete: {len(findings)} findings")
 
         return {
             "success": True, "findings": findings,
@@ -2082,6 +2346,11 @@ class AndroHunterAgent:
                     "severity": severity,
                 })
 
+        target_sdk = None
+        sdk_match = re.search(r"targetSdk(?:Version)?[=:]\s*(\d+)", dump)
+        if sdk_match:
+            target_sdk = int(sdk_match.group(1))
+
         exported_count = sum(1 for c in components if c["exported"])
         risk_chips = []
         if is_debuggable:
@@ -2089,7 +2358,7 @@ class AndroHunterAgent:
             findings.append({
                 "severity": "CRITICAL", "category": "Manifest/Debug",
                 "title": "Application is debuggable",
-                "description": "android:debuggable=true allows attaching a debugger",
+                "description": "android:debuggable=true allows attaching a debugger and extracting app data",
                 "recommendation": "Remove debuggable flag in release builds",
             })
         if allow_backup:
@@ -2100,18 +2369,81 @@ class AndroHunterAgent:
                 "description": "android:allowBackup=true allows data extraction via adb backup",
                 "recommendation": "Set android:allowBackup='false'",
             })
+        if cleartext:
+            risk_chips.append({"label": "CLEARTEXT", "severity": "HIGH"})
+            findings.append({
+                "severity": "HIGH", "category": "Manifest/Network",
+                "title": "Cleartext (HTTP) traffic permitted",
+                "description": "App allows unencrypted HTTP communication, enabling MITM attacks",
+                "recommendation": "Set usesCleartextTraffic=false and use HTTPS only",
+            })
+        if target_sdk and target_sdk < 23:
+            risk_chips.append({"label": f"SDK {target_sdk}", "severity": "HIGH"})
+            findings.append({
+                "severity": "HIGH", "category": "Manifest/SDK",
+                "title": f"Low targetSdkVersion ({target_sdk})",
+                "description": f"targetSdkVersion={target_sdk} (< 23) bypasses runtime permissions — all permissions auto-granted at install",
+                "recommendation": "Raise targetSdkVersion to 33+ and implement runtime permission requests",
+            })
+        if target_sdk and target_sdk < 28:
+            findings.append({
+                "severity": "MEDIUM", "category": "Manifest/SDK",
+                "title": f"targetSdkVersion below 28 ({target_sdk})",
+                "description": "Apps targeting < API 28 default to usesCleartextTraffic=true",
+                "recommendation": "Upgrade targetSdkVersion and add network security config",
+            })
         if exported_count > 3:
             risk_chips.append({"label": f"{exported_count} EXPORTED", "severity": "HIGH"})
         if len(dangerous_perms) > 5:
             risk_chips.append({"label": f"{len(dangerous_perms)} DANGEROUS PERMS", "severity": "MEDIUM"})
 
+        sms_perms = [p for p in permissions if "SMS" in p.upper()]
+        if sms_perms:
+            findings.append({
+                "severity": "HIGH", "category": "Manifest/Permissions",
+                "title": f"SMS permissions: {', '.join(sms_perms)}",
+                "description": "App has SMS permissions which could be abused to exfiltrate data",
+                "recommendation": "Remove SEND_SMS if not core functionality; review SMS usage for data leaks",
+            })
+        phone_perms = [p for p in permissions if "PHONE" in p.upper() or "CALL_LOG" in p.upper()]
+        if phone_perms:
+            findings.append({
+                "severity": "MEDIUM", "category": "Manifest/Permissions",
+                "title": f"Phone/call permissions: {', '.join(phone_perms)}",
+                "description": "App accesses phone state or call logs without clear necessity for banking",
+                "recommendation": "Evaluate if these permissions are strictly necessary",
+            })
+        location_perms = [p for p in permissions if "LOCATION" in p.upper()]
+        contact_perms = [p for p in permissions if "CONTACT" in p.upper() or "PROFILE" in p.upper()]
+        if location_perms:
+            findings.append({
+                "severity": "MEDIUM", "category": "Manifest/Permissions",
+                "title": f"Location permissions: {', '.join(location_perms)}",
+                "description": "App collects location data",
+                "recommendation": "Verify location is needed; use coarse-only if possible",
+            })
+        if contact_perms:
+            findings.append({
+                "severity": "MEDIUM", "category": "Manifest/Permissions",
+                "title": f"Contact/profile permissions: {', '.join(contact_perms)}",
+                "description": "App reads contacts and user profile data",
+                "recommendation": "Remove if not required for app functionality",
+            })
+
         for c in components:
             if c["severity"] == "HIGH":
+                comp_desc = f"Full name: {c['full_name']}"
+                if c["type"] == "provider":
+                    comp_desc += ". Exported ContentProvider without permission allows any app to query/modify data (SQL injection risk)."
+                elif c["type"] == "receiver":
+                    comp_desc += ". Exported BroadcastReceiver can be triggered by any app — may leak data or execute privileged actions."
+                elif c["type"] == "activity":
+                    comp_desc += ". Exported Activity can be launched without authentication — potential auth bypass."
                 findings.append({
                     "severity": "HIGH",
                     "category": f"Manifest/Exported {c['type'].title()}",
                     "title": f"Exported {c['type']} without permission: {c['name']}",
-                    "description": f"Full name: {c['full_name']}",
+                    "description": comp_desc,
                     "recommendation": "Add permission protection or set exported=false",
                 })
 
@@ -2125,6 +2457,7 @@ class AndroHunterAgent:
             "is_debuggable": is_debuggable,
             "allow_backup": allow_backup,
             "cleartext_traffic": cleartext,
+            "target_sdk": target_sdk,
             "exported_count": exported_count,
         }
 
@@ -2494,6 +2827,178 @@ class AndroHunterAgent:
             ]
         return result
 
+    async def scan_source_vulnerabilities(self, apk_path: str,
+                                           progress_cb: Optional[Callable] = None) -> dict:
+        """Decompile APK and scan Java source for code-level vulnerabilities.
+        Uses jadx to get real source context for accurate detection."""
+        import tempfile
+        findings = []
+
+        if not os.path.exists(apk_path):
+            return {"success": False, "error": "APK not found", "findings": []}
+
+        jadx_path = shutil.which("jadx")
+        if not jadx_path:
+            return {"success": False, "error": "jadx not installed", "findings": []}
+
+        if progress_cb:
+            await progress_cb("hunter", 10, "Decompiling APK with jadx...")
+
+        with tempfile.TemporaryDirectory(prefix="hunter_src_") as tmpdir:
+            proc = await asyncio.create_subprocess_exec(
+                jadx_path, "-d", tmpdir, "--no-res", apk_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
+
+            java_files = []
+            xml_files = []
+            for root, _dirs, files in os.walk(tmpdir):
+                for fname in files:
+                    fpath = os.path.join(root, fname)
+                    rel = os.path.relpath(fpath, tmpdir)
+                    if fname.endswith(".java"):
+                        if "/android/" in rel and "/insecure" not in rel.lower():
+                            continue
+                        java_files.append((rel, fpath))
+                    elif fname.endswith(".xml") and ("/res/" in rel or "/values/" in rel or fname == "AndroidManifest.xml"):
+                        xml_files.append((rel, fpath))
+
+            if progress_cb:
+                await progress_cb("hunter", 35, f"Scanning {len(java_files)} source + {len(xml_files)} XML files...")
+
+            seen = set()
+            for i, (rel_path, fpath) in enumerate(java_files):
+                try:
+                    with open(fpath, "r", errors="replace") as f:
+                        content = f.read()
+                except Exception:
+                    continue
+
+                class_name = os.path.splitext(os.path.basename(fpath))[0]
+
+                for label, info in DEX_CODE_PATTERNS.items():
+                    for m in re.finditer(info["pattern"], content):
+                        match_text = m.group(0)
+                        line_no = content[:m.start()].count("\n") + 1
+
+                        ctx_start = max(0, m.start() - 80)
+                        ctx_end = min(len(content), m.end() + 80)
+                        context = content[ctx_start:ctx_end].strip()
+
+                        dedup_key = (label, class_name)
+                        if dedup_key in seen:
+                            continue
+                        seen.add(dedup_key)
+
+                        findings.append({
+                            "severity": info["severity"],
+                            "category": info["category"],
+                            "title": f"{info['title']}",
+                            "description": info["description"],
+                            "location": f"{rel_path}:{line_no}",
+                            "evidence": context[:400],
+                            "classification": "VULN" if info["severity"] in ("CRITICAL", "HIGH") else "SUSP",
+                            "recommendation": info["recommendation"],
+                            "class": class_name,
+                        })
+
+                for sec_label, (pattern, sev_class) in DEX_SECRET_PATTERNS.items():
+                    for m in re.finditer(pattern, content):
+                        val = m.group(1) if m.lastindex and m.lastindex >= 1 else m.group(0)
+                        if not val or len(val) < 8:
+                            continue
+                        dedup_key = (sec_label, val[:60])
+                        if dedup_key in seen:
+                            continue
+                        seen.add(dedup_key)
+                        line_no = content[:m.start()].count("\n") + 1
+                        sev_map = {"VULN": "CRITICAL", "SUSP": "MEDIUM", "INFO": "LOW"}
+                        findings.append({
+                            "severity": sev_map.get(sev_class, "MEDIUM"),
+                            "category": f"Source Secrets/{sec_label}",
+                            "title": f"{sec_label} in {class_name}",
+                            "description": val[:200],
+                            "location": f"{rel_path}:{line_no}",
+                            "evidence": val[:300],
+                            "classification": sev_class,
+                            "recommendation": "Remove hardcoded secrets; use Android Keystore or server-side config",
+                            "class": class_name,
+                        })
+
+        if progress_cb:
+            await progress_cb("hunter", 90, f"Scanning {len(xml_files)} XML resources...")
+
+        for rel_path, fpath in xml_files:
+            try:
+                with open(fpath, "r", errors="replace") as f:
+                    content = f.read()
+            except Exception:
+                continue
+
+            fname = os.path.basename(fpath)
+
+            _skip_xml = {"title_activity_", "hint_", "label_", "app_name", "action_settings",
+                         "loginscreen_password", "loginscreen_username", "button_"}
+            if "strings.xml" in fname or "values" in rel_path:
+                for m in re.finditer(r'<string\s+name="([^"]*(?:is_admin|is_root|is_debug|admin_mode|debug_mode|secret_key|api_key|master_password)[^"]*)"[^>]*>([^<]+)</string>', content, re.IGNORECASE):
+                    name_attr, value = m.group(1), m.group(2)
+                    if any(name_attr.startswith(skip) for skip in _skip_xml):
+                        continue
+                    dedup_key = ("xml_auth_flag", name_attr)
+                    if dedup_key in seen:
+                        continue
+                    seen.add(dedup_key)
+                    findings.append({
+                        "severity": "MEDIUM",
+                        "category": "Weak Authentication",
+                        "title": f"Patchable auth/config flag: {name_attr}={value}",
+                        "description": f"String resource '{name_attr}' with value '{value}' can be patched by recompiling the APK to bypass client-side checks",
+                        "location": rel_path,
+                        "evidence": m.group(0)[:200],
+                        "classification": "SUSP",
+                        "recommendation": "Move authorization to server-side; never rely on client-side resource flags",
+                    })
+
+            if "/layout" in rel_path:
+                edittexts = list(re.finditer(r'<EditText[^>]*>', content, re.DOTALL))
+                for m in edittexts:
+                    tag = m.group(0)
+                    eid = re.search(r'android:id="@\+id/([^"]+)"', tag)
+                    eid_name = eid.group(1) if eid else "unknown"
+                    is_sensitive = any(kw in eid_name.lower() for kw in ("password", "passwd", "pin", "secret", "account", "credit", "ssn"))
+                    has_input_type = "android:inputType" in tag
+                    has_no_suggest = "textNoSuggestions" in tag or "textPassword" in tag
+                    if is_sensitive and not has_no_suggest:
+                        dedup_key = ("keyboard_cache", eid_name)
+                        if dedup_key in seen:
+                            continue
+                        seen.add(dedup_key)
+                        findings.append({
+                            "severity": "MEDIUM",
+                            "category": "Information Leakage",
+                            "title": f"Keyboard cache risk on sensitive field: {eid_name}",
+                            "description": "Sensitive EditText field without textPassword/textNoSuggestions inputType — keyboard may cache typed data",
+                            "location": rel_path,
+                            "evidence": tag[:200],
+                            "classification": "SUSP",
+                            "recommendation": "Set android:inputType='textPassword' or 'textNoSuggestions' and android:importantForAutofill='no'",
+                        })
+
+        sev_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+        findings.sort(key=lambda f: sev_order.get(f["severity"], 9))
+
+        if progress_cb:
+            await progress_cb("hunter", 100, f"Source scan complete: {len(findings)} vulnerabilities")
+
+        return {
+            "success": True,
+            "findings": findings,
+            "total_findings": len(findings),
+            "files_scanned": len(java_files),
+        }
+
     async def full_hunt(self, package: str, apk_path: str = None,
                          progress_cb: Optional[Callable] = None) -> dict:
         """Run all AndroHunter modules on a package."""
@@ -2516,6 +3021,7 @@ class AndroHunterAgent:
         if apk_path and os.path.exists(apk_path):
             modules.append(("fileprovider", lambda: self.analyze_fileproviders(package, apk_path, sub_progress)))
             modules.append(("dex_secrets", lambda: self.scan_dex_secrets(apk_path, sub_progress)))
+            modules.append(("source_scan", lambda: self.scan_source_vulnerabilities(apk_path, sub_progress)))
 
         for i, (name, fn) in enumerate(modules):
             if progress_cb:

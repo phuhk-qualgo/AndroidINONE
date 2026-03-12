@@ -529,6 +529,18 @@ async def hunter_dex_secrets(package: str):
     return await agent_mgr.hunter.scan_dex_secrets(apk_path, progress_cb)
 
 
+@app.post("/api/agents/hunter/source-scan/{package}")
+async def hunter_source_scan(package: str):
+    apk_path = str(UPLOADS_DIR / f"{package}.apk")
+    if not os.path.exists(apk_path):
+        pulled = await adb.pull_apk(package, apk_path)
+        if not pulled:
+            raise HTTPException(500, f"Failed to pull APK for {package}")
+    async def progress_cb(agent, pct, msg):
+        await ws_manager.broadcast({"type": "agent_progress", "agent": agent, "percent": pct, "message": msg})
+    return await agent_mgr.hunter.scan_source_vulnerabilities(apk_path, progress_cb)
+
+
 @app.post("/api/agents/hunter/full/{package}")
 async def hunter_full(package: str):
     apk_path = str(UPLOADS_DIR / f"{package}.apk")
