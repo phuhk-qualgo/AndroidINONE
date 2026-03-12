@@ -276,12 +276,12 @@ async function pgHunter(mc){
     <div class="page-title">Hunter – Comprehensive Security Testing</div>
     <div class="card">
       <div class="card-title">Full Hunt</div>
-      <div style="font-size:11px;color:var(--t2);margin-bottom:8px">Run all modules: Intent Fuzzer, Provider Fuzzer, Broadcast Fuzzer, FileProvider Analyzer, StrandHogg Check, DEX Secret Scan</div>
+      <div style="font-size:11px;color:var(--t2);margin-bottom:8px">Run all modules: Intent Fuzzer, Provider Fuzzer, Broadcast Fuzzer, FileProvider, StrandHogg, DEX Secrets, SharedPrefs, Manifest</div>
       <div class="ig"><input id="hpkg" placeholder="com.example.app" value="${esc(selPkg)}"><button class="btn btn-green btn-lg" onclick="hunterFull()">Run Full Hunt</button></div>
       <div id="h-prog" style="margin-top:8px"></div>
     </div>
     <div class="card">
-      <div class="card-title">Individual Modules</div>
+      <div class="card-title">Fuzzing & Analysis</div>
       <div style="display:flex;flex-wrap:wrap;gap:6px">
         <button class="btn btn-accent" onclick="hunterMod('intents')">Intent Fuzzer</button>
         <button class="btn btn-accent" onclick="hunterMod('providers')">Provider Fuzzer</button>
@@ -289,9 +289,41 @@ async function pgHunter(mc){
         <button class="btn btn-accent" onclick="hunterMod('fileprovider')">FileProvider</button>
         <button class="btn btn-accent" onclick="hunterMod('taskhijack')">StrandHogg</button>
         <button class="btn btn-accent" onclick="hunterMod('dex')">DEX Secrets</button>
+        <button class="btn btn-accent" onclick="hunterMod('sharedprefs')">SharedPrefs</button>
+        <button class="btn btn-accent" onclick="hunterMod('manifest')">Manifest</button>
+      </div>
+    </div>
+    <div class="g2">
+      <div class="card">
+        <div class="card-title">Activity Launcher</div>
+        <div class="fg"><label class="fl">Activity</label><input id="h-act" placeholder="Click 'List' to load activities"></div>
+        <div class="fg"><label class="fl">Data URI</label><input id="h-act-data" placeholder="content:// or file:// or https://"></div>
+        <div class="fg"><label class="fl">Extras (k=v,k=v)</label><input id="h-act-extras" placeholder="key1=val1,key2=val2"></div>
+        <div style="display:flex;gap:6px;margin-top:6px">
+          <button class="btn" onclick="hListActs()">List Activities</button>
+          <button class="btn btn-accent" onclick="hLaunchAct()">Launch</button>
+        </div>
+        <div id="h-act-list" style="margin-top:6px;max-height:150px;overflow-y:auto"></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Frida Script Generator</div>
+        <div id="h-frida-tpls"></div>
+        <button class="btn btn-accent" style="margin-top:6px" onclick="hLoadFridaTemplates()">Load Templates</button>
+        <div id="h-frida-out" style="margin-top:6px"></div>
       </div>
     </div>
     <div id="h-results"></div>
+    <div class="g2">
+      <div class="card">
+        <div class="card-title">SSL Bypass Guide</div>
+        <div id="h-ssl-methods"><button class="btn" onclick="hLoadSSL()">Load Methods</button></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Auto ADB</div>
+        <div id="h-auto-adb"><button class="btn" onclick="hLoadAutoAdb()">Load Commands</button></div>
+        <div id="h-adb-out" style="margin-top:6px"></div>
+      </div>
+    </div>
     <div class="card">
       <div class="card-title">Module Details</div>
       <table>
@@ -301,6 +333,12 @@ async function pgHunter(mc){
         <tr><td><strong style="font-size:11px">FileProvider</strong></td><td style="font-size:11px;color:var(--t2)">Parse FileProvider XML paths (root/cache/external), 9 path traversal payloads incl. URL-encoded.</td></tr>
         <tr><td><strong style="font-size:11px">StrandHogg</strong></td><td style="font-size:11px;color:var(--t2)">Detect StrandHogg 1.0: custom taskAffinity, empty affinity, standard launchMode.</td></tr>
         <tr><td><strong style="font-size:11px">DEX Secrets</strong></td><td style="font-size:11px;color:var(--t2)">19 patterns: API keys, AWS, Firebase, JWT, passwords, IPs, debug flags, SQL queries. VULN/SUSP/INFO.</td></tr>
+        <tr><td><strong style="font-size:11px">SharedPrefs</strong></td><td style="font-size:11px;color:var(--t2)">Read SharedPreferences files and flag 15 sensitive key types: token, password, secret, auth, jwt, etc.</td></tr>
+        <tr><td><strong style="font-size:11px">Manifest</strong></td><td style="font-size:11px;color:var(--t2)">Analyze exported components, permissions, debug/backup flags. HIGH/MEDIUM/INFO severity rules.</td></tr>
+        <tr><td><strong style="font-size:11px">Frida Generator</strong></td><td style="font-size:11px;color:var(--t2)">6 templates: SSL Bypass, Root Bypass, Login Bypass, Crypto Monitor, SQL Monitor, HTTP Intercept.</td></tr>
+        <tr><td><strong style="font-size:11px">SSL Bypass</strong></td><td style="font-size:11px;color:var(--t2)">6 methods: Frida codeshare, objection, Magisk, NSC patch, Xposed, Burp CA manual install.</td></tr>
+        <tr><td><strong style="font-size:11px">Activity Launcher</strong></td><td style="font-size:11px;color:var(--t2)">List and launch activities with custom data URIs and extras for deep link testing.</td></tr>
+        <tr><td><strong style="font-size:11px">Auto ADB</strong></td><td style="font-size:11px;color:var(--t2)">Predefined ADB commands across 5 categories: App Info, Storage, Network, Security, Logcat.</td></tr>
       </table>
     </div>
     <div class="card">
@@ -320,7 +358,7 @@ async function hunterFull(){
   if(!r?.success&&(r?.detail||r?.error)){d.innerHTML=`<div class="card" style="border-left:3px solid var(--red)">${esc(r.detail||r.error)}</div>`;return}
   const findings=r?.findings||[];
   const mods=r?.modules||{};
-  const modNames={intent_fuzzer:'Intent Fuzzer',provider_fuzzer:'Provider Fuzzer',broadcast_fuzzer:'Broadcast Fuzzer',fileprovider:'FileProvider',task_hijack:'StrandHogg',dex_secrets:'DEX Secrets'};
+  const modNames={intent_fuzzer:'Intent Fuzzer',provider_fuzzer:'Provider Fuzzer',broadcast_fuzzer:'Broadcast Fuzzer',fileprovider:'FileProvider',task_hijack:'StrandHogg',dex_secrets:'DEX Secrets',shared_prefs:'SharedPrefs',manifest:'Manifest'};
   const crit=findings.filter(f=>f.severity==='CRITICAL').length;
   const high=findings.filter(f=>f.severity==='HIGH').length;
   const med=findings.filter(f=>f.severity==='MEDIUM').length;
@@ -348,6 +386,53 @@ async function hunterMod(mod){
   const findings=r?.findings||[];
   d.innerHTML=`<div class="card"><div class="card-title">${esc(mod)} Results <span class="tag ${r?.success?'tag-g':'tag-r'}">${findings.length} findings</span></div>${findings.length?renderFindings(findings):'<span style="color:var(--t3)">No findings</span>'}</div>`;
   toast(`${mod}: ${findings.length} findings`,findings.length?'ok':'info');
+}
+
+// ── Hunter sub-modules ──
+async function hListActs(){
+  const p=$('hpkg').value.trim();if(!p)return toast('Enter package','err');
+  const el=$('h-act-list');el.innerHTML='<span style="color:var(--t3)">Loading...</span>';
+  const r=await api(`/api/agents/hunter/activities/${p}`);
+  const acts=r?.activities||[];
+  el.innerHTML=acts.length?`<table>${acts.map(a=>`<tr><td><code style="font-size:10px;cursor:pointer;color:var(--accent)" onclick="$('h-act').value='${esc(a.full_name)}'">${esc(a.name)}</code></td><td>${a.exported?'<span class="tag tag-r" style="font-size:9px">EXP</span>':''}</td></tr>`).join('')}</table>`:'<span style="color:var(--t3)">No activities found</span>';
+}
+async function hLaunchAct(){
+  const p=$('hpkg').value.trim(),a=$('h-act').value.trim();if(!p||!a)return toast('Fill package & activity','err');
+  const d=$('h-act-data').value.trim();
+  const extStr=$('h-act-extras').value.trim();
+  let extras={};if(extStr)extStr.split(',').forEach(kv=>{const[k,v]=kv.split('=');if(k&&v)extras[k.trim()]=v.trim()});
+  const r=await api(`/api/agents/hunter/launch/${p}?activity=${enc(a)}&data_uri=${enc(d)}`,'POST');
+  toast(r?.success?'Activity launched':'Launch failed',r?.success?'ok':'err');
+  if(r?.output){const el=$('h-act-list');el.innerHTML=`<pre class="terminal" style="max-height:80px">${esc(r.output)}</pre>`}
+}
+async function hLoadFridaTemplates(){
+  const p=$('hpkg').value.trim()||'';
+  const r=await api(`/api/agents/hunter/frida-templates?package=${enc(p)}`);
+  const tpls=r?.templates||[];
+  $('h-frida-tpls').innerHTML=tpls.map(t=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid var(--bd)"><div><strong style="font-size:11px">${esc(t.name)}</strong> <span class="tag" style="font-size:9px">${esc(t.category)}</span><div style="font-size:10px;color:var(--t3)">${esc(t.desc)}</div></div><button class="btn btn-sm btn-accent" onclick="hShowFrida('${esc(t.key)}')">View</button></div>`).join('');
+  window._hFridaTpls=tpls;
+}
+function hShowFrida(key){
+  const t=(window._hFridaTpls||[]).find(x=>x.key===key);if(!t)return;
+  $('h-frida-out').innerHTML=`<div class="card" style="margin:0"><div class="card-title">${esc(t.name)}<button class="btn btn-sm" style="margin-left:8px" onclick="navigator.clipboard.writeText(window._hFridaTpls.find(x=>x.key==='${key}').code);toast('Copied!','ok')">Copy</button></div><pre class="terminal" style="max-height:250px">${esc(t.code)}</pre></div>`;
+}
+async function hLoadSSL(){
+  const p=$('hpkg').value.trim()||'';
+  const r=await api(`/api/agents/hunter/ssl-methods?package=${enc(p)}`);
+  const methods=r?.methods||[];
+  $('h-ssl-methods').innerHTML=methods.map(m=>`<div style="padding:6px 0;border-bottom:1px solid var(--bd)"><div style="display:flex;justify-content:space-between;align-items:center"><strong style="font-size:11px">${esc(m.name)}</strong><span class="tag" style="font-size:9px">${esc(m.difficulty)}</span></div><div style="font-size:10px;color:var(--t3)">${esc(m.desc)}</div>${m.command?`<code style="font-size:10px;cursor:pointer;color:var(--accent);display:block;margin-top:3px" onclick="navigator.clipboard.writeText('${esc(m.command)}');toast('Copied!','ok')">${esc(m.command)}</code>`:''}<div style="margin-top:3px">${m.steps.map((s,i)=>`<div style="font-size:10px;color:var(--t2)">${i+1}. ${esc(s)}</div>`).join('')}</div></div>`).join('');
+}
+async function hLoadAutoAdb(){
+  const p=$('hpkg').value.trim()||'';
+  const r=await api(`/api/agents/hunter/auto-adb?package=${enc(p)}`);
+  const cats=r?.categories||{};
+  $('h-auto-adb').innerHTML=Object.entries(cats).map(([cat,cmds])=>`<div style="margin-bottom:8px"><strong style="font-size:11px;color:var(--t2)">${esc(cat)}</strong>${cmds.map(c=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:2px 0"><code style="font-size:10px;cursor:pointer;color:var(--accent);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(c.command)}" onclick="hRunAdb('${esc(c.command)}')">${esc(c.label)}</code><button class="btn btn-sm" style="padding:0 4px;font-size:9px;flex-shrink:0" onclick="hRunAdb('${esc(c.command)}')">▶</button></div>`).join('')}</div>`).join('');
+}
+async function hRunAdb(cmd){
+  const p=$('hpkg').value.trim();if(!p)return toast('Enter package','err');
+  const d=$('h-adb-out');d.innerHTML=cardLoading('Running...');
+  const r=await api(`/api/agents/hunter/auto-adb/run?package=${enc(p)}&command=${enc(cmd)}`,'POST');
+  d.innerHTML=`<div style="margin-top:4px"><div style="font-size:10px;color:var(--t3);margin-bottom:3px">$ ${esc(r?.command||cmd)}</div><pre class="terminal" style="max-height:180px">${esc(r?.output||'No output')}</pre></div>`;
 }
 
 // ────────────────── FRIDA ──────────────────

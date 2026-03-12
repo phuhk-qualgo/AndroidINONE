@@ -541,6 +541,50 @@ async def hunter_full(package: str):
     return await agent_mgr.hunter.full_hunt(package, apk_path, progress_cb)
 
 
+@app.post("/api/agents/hunter/sharedprefs/{package}")
+async def hunter_shared_prefs(package: str):
+    async def progress_cb(agent, pct, msg):
+        await ws_manager.broadcast({"type": "agent_progress", "agent": agent, "percent": pct, "message": msg})
+    return await agent_mgr.hunter.read_shared_prefs(package, progress_cb)
+
+
+@app.post("/api/agents/hunter/manifest/{package}")
+async def hunter_manifest(package: str):
+    async def progress_cb(agent, pct, msg):
+        await ws_manager.broadcast({"type": "agent_progress", "agent": agent, "percent": pct, "message": msg})
+    return await agent_mgr.hunter.analyze_manifest(package, progress_cb)
+
+
+@app.get("/api/agents/hunter/activities/{package}")
+async def hunter_list_activities(package: str):
+    return await agent_mgr.hunter.list_activities(package)
+
+
+@app.post("/api/agents/hunter/launch/{package}")
+async def hunter_launch_activity(package: str, activity: str, data_uri: str = "", extras: dict = None):
+    return await agent_mgr.hunter.launch_activity(package, activity, data_uri, extras or {})
+
+
+@app.get("/api/agents/hunter/frida-templates")
+async def hunter_frida_templates(package: str = ""):
+    return {"templates": agent_mgr.hunter.get_frida_templates(package)}
+
+
+@app.get("/api/agents/hunter/ssl-methods")
+async def hunter_ssl_methods(package: str = ""):
+    return {"methods": agent_mgr.hunter.get_ssl_bypass_methods(package)}
+
+
+@app.get("/api/agents/hunter/auto-adb")
+async def hunter_auto_adb_commands(package: str = ""):
+    return {"categories": agent_mgr.hunter.get_auto_adb_commands(package)}
+
+
+@app.post("/api/agents/hunter/auto-adb/run")
+async def hunter_run_auto_adb(package: str, command: str):
+    return await agent_mgr.hunter.run_auto_adb(package, command)
+
+
 # ── MEDUSA (full workflow: stash → compile → run) ──
 
 @app.get("/api/agents/medusa/modules")
